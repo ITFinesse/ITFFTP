@@ -1,0 +1,15 @@
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "files.exclude": {
+    "out": false,
+    "dist": false
+  },
+  "search.exclude": {
+    "out": true,
+    "dist": true,
+    "node_modules": true
+  },
+  "stackerftp.remoteExplorerSortOrder": "name",
+  "stackerftp.showHiddenFiles": true
+}

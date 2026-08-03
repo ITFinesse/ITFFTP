@@ -1,0 +1,48 @@
+# VS Code Extension Ignore
+.vscode/**
+.vscode-test/**
+src/**
+out/**
+esbuild.js
+.gitignore
+.yarnrc
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/.eslintrc.json
+**/*.map
+**/*.ts
+!**/*.d.ts
+
+# Dependencies are bundled into dist/extension.js. Codicon webview assets are
+# copied into resources/codicons, so no node_modules are needed at runtime.
+node_modules/**
+
+# Caches and Temp files
+.npm/**
+.npm-cache/**
+.cache/**
+.temp/**
+.tmp/**
+dist-test/**
+coverage/**
+
+# Internal documentation and tools
+DEVELOPMENT.md
+FEATURE_PLAN.md
+FEATURES.md
+.claude/
+brain/
+
+# Recursive VSIX & Logs
+**/*.vsix
+**/*.log
+
+# Other
+webpack.config.js
+.git/**
+.github/**
+resources/icon-source/**
+.DS_Store
+publish.sh
+build.sh
+.snapshotfinesse/

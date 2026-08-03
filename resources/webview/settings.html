@@ -1,0 +1,102 @@
+<main class="settings-container">
+  <header class="settings-header">
+    <div>
+      <h1>ITFinesse FTP Settings</h1>
+      <p>Workspace settings for connection behavior and the Remote Explorer.</p>
+    </div>
+    <button class="icon-button" id="btnOpenJson" title="Open settings.json">
+      <span class="codicon codicon-go-to-file"></span>
+    </button>
+  </header>
+
+  <div class="message hidden" id="settingsMessage" role="status"></div>
+
+  <section class="settings-section">
+    <h2>Connection profiles</h2>
+    <p class="section-description">All server profiles from <code>.vscode/sftp.json</code>. Use one object or an array of objects. Changes are validated before saving.</p>
+    <textarea id="connections" spellcheck="false" aria-label="Connection profiles JSON"></textarea>
+    <p class="sensitive-note"><span class="codicon codicon-shield"></span> Passwords and key passphrases entered here are stored in the workspace configuration file.</p>
+  </section>
+
+  <section class="settings-section">
+    <h2>Connection</h2>
+    <label class="setting-row">
+      <span><strong>Auto-connect on startup</strong><small>Connect to the active configured server shortly after VS Code starts. Stored credentials or a private key are required.</small></span>
+      <input type="checkbox" id="autoConnect">
+    </label>
+    <label class="setting-row">
+      <span><strong>Auto-reconnect after disconnect</strong><small>Retry a connection when the server drops it unexpectedly.</small></span>
+      <input type="checkbox" id="autoReconnect">
+    </label>
+  </section>
+
+  <section class="settings-section">
+    <h2>Remote Explorer</h2>
+    <label class="setting-row">
+      <span><strong>Refresh after operations</strong><small>Refresh the Remote Explorer after uploads, downloads, and file changes.</small></span>
+      <input type="checkbox" id="autoRefresh">
+    </label>
+    <label class="setting-row">
+      <span><strong>Show hidden files</strong><small>Include dotfiles and other hidden entries in remote listings.</small></span>
+      <input type="checkbox" id="showHiddenFiles">
+    </label>
+    <label class="setting-row">
+      <span><strong>Show WebMaster tools</strong><small>Show checksum, permissions, backup, and cache tools.</small></span>
+      <input type="checkbox" id="showWebMasterTools">
+    </label>
+    <label class="setting-row setting-row-select">
+      <span><strong>Sort remote entries by</strong><small>Default ordering for files and folders.</small></span>
+      <select id="remoteExplorerSortOrder">
+        <option value="name">Name</option>
+        <option value="size">Size</option>
+        <option value="date">Modified date</option>
+        <option value="type">Type</option>
+      </select>
+    </label>
+    <label class="setting-row setting-row-select">
+      <span><strong>Transfer concurrency</strong><small>Maximum parallel transfers for bulk operations (1–10).</small></span>
+      <input type="number" id="transferConcurrency" min="1" max="10" step="1">
+    </label>
+    <label class="setting-row">
+      <span><strong>Use native TreeView</strong><small>Use the native Remote Explorer with file icons. Requires reload when changed.</small></span>
+      <input type="checkbox" id="useNativeTreeView">
+    </label>
+    <label class="setting-row">
+      <span><strong>Download when opening remote files</strong><small>Download a remote file instead of opening its read-only content view.</small></span>
+      <input type="checkbox" id="downloadWhenOpenInRemoteExplorer">
+    </label>
+  </section>
+
+  <section class="settings-section">
+    <h2>Safety and local behavior</h2>
+    <label class="setting-row">
+      <span><strong>Confirm before deleting</strong><small>Ask for confirmation before deleting remote files or folders.</small></span>
+      <input type="checkbox" id="confirmDelete">
+    </label>
+    <label class="setting-row">
+      <span><strong>Confirm before syncing</strong><small>Ask for confirmation before synchronizing directories.</small></span>
+      <input type="checkbox" id="confirmSync">
+    </label>
+    <label class="setting-row">
+      <span><strong>Enable file watcher</strong><small>Watch local files for configured automatic upload and delete actions.</small></span>
+      <input type="checkbox" id="enableFileWatcher">
+    </label>
+    <label class="setting-row">
+      <span><strong>Default syntax highlighting</strong><small>Enable syntax highlighting when viewing remote text files.</small></span>
+      <input type="checkbox" id="defaultSyntaxHighlighting">
+    </label>
+  </section>
+
+  <section class="settings-section">
+    <h2>Named remotes</h2>
+    <p class="section-description">Optional reusable remote definitions referenced by <code>"remote"</code> in a connection profile.</p>
+    <textarea id="remotes" spellcheck="false" aria-label="Named remotes JSON"></textarea>
+  </section>
+
+  <footer class="settings-actions">
+    <button class="button secondary" id="btnReset">Reset workspace overrides</button>
+    <span class="action-spacer"></span>
+    <button class="button secondary" id="btnReload">Reload</button>
+    <button class="button primary" id="btnSave">Save settings</button>
+  </footer>
+</main>
