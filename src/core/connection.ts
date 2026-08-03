@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Base Connection Interface
+ * ITFFTP - Base Connection Interface
  */
 
 import { EventEmitter } from 'events';

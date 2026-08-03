@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Transfer Manager
+ * ITFFTP - Transfer Manager
  */
 
 import * as vscode from 'vscode';

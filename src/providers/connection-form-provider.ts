@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Connection Form WebView Provider
+ * ITFFTP - Connection Form WebView Provider
  *
  * Minimalist connection form compatible with native VS Code UI
  */
@@ -243,7 +243,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
       this._view?.webview.postMessage({ type: 'saveSuccess' });
       statusBar.success('Connection saved');
-      vscode.window.showInformationMessage(`ITFinesse FTP: Saved to ${configManager.getConfigPath(workspaceRoot)}`);
+      vscode.window.showInformationMessage(`ITFFTP: Saved to ${configManager.getConfigPath(workspaceRoot)}`);
       await this._sendConfigs();
     } catch (error: any) {
       this._view?.webview.postMessage({ type: 'saveError', message: error.message });
@@ -430,7 +430,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https:; script-src 'nonce-${nonce}' ${webview.cspSource}; style-src 'unsafe-inline' ${webview.cspSource}; font-src ${webview.cspSource};">
-  <title>ITFinesse FTP Connections</title>
+  <title>ITFFTP Connections</title>
   <link href="${codiconUri}" rel="stylesheet" />
   <style>
     ${cssContent}

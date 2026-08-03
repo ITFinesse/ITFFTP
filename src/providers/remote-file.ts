@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Remote File Tree Item
+ * ITFFTP - Remote File Tree Item
  */
 
 import * as vscode from 'vscode';

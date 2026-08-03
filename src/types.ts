@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Type Definitions
+ * ITFFTP - Type Definitions
  */
 
 export type Protocol = 'ftp' | 'ftps' | 'sftp';

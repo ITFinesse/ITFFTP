@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Connection Wizard
+ * ITFFTP - Connection Wizard
  * 
  * Provides an interactive wizard for creating and managing connections
  * with protocol selection (FTP, FTPS, SFTP)

@@ -1,202 +1,103 @@
-# Contributing to StackerFTP
+# Contributing to ITFFTP
 
-Thank you for your interest in contributing to StackerFTP! This document provides guidelines and instructions for contributing.
+Thank you for helping maintain ITFFTP. This fork is maintained by Stephen Stern under ITFinesse and preserves attribution to the upstream SFTP and StackerFTP projects.
 
-## Development Setup
+## Development setup
 
-### Prerequisites
-- Node.js 18.x or higher
-- npm 9.x or higher
-- VS Code 1.74.0 or higher
+Prerequisites:
 
-### Setup
+- Node.js 18 or newer
+- npm 9 or newer
+- VS Code 1.75 or newer
 
-1. Fork and clone the repository:
-```bash
-git clone https://github.com/yasinkuyu/stackerftp.git
-cd stackerftp
-```
-
-2. Install dependencies:
-```bash
+```powershell
+git clone https://github.com/ITFinesse/ITFFTP.git
+cd ITFFTP
 npm install
-```
-
-3. Open in VS Code:
-```bash
 code .
 ```
 
-4. Press `F5` to run the extension in a new Extension Development Host window.
+Press `F5` to launch an Extension Development Host.
 
-## Project Structure
+## Project areas
 
-```
-stackerftp/
-├── src/
-│   ├── core/               # Core functionality
-│   │   ├── config.ts       # Configuration management
-│   │   ├── connection.ts   # Base connection interface
-│   │   ├── connection-manager.ts
-│   │   ├── ftp-connection.ts
-│   │   ├── sftp-connection.ts
-│   │   └── transfer-manager.ts
-│   ├── providers/          # TreeView providers
-│   │   ├── remote-explorer.ts
-│   │   └── remote-file.ts
-│   ├── commands/           # Command handlers
-│   │   └── index.ts
-│   ├── webmaster/          # Web master tools
-│   │   └── tools.ts
-│   ├── utils/              # Utilities
-│   │   ├── helpers.ts
-│   │   ├── logger.ts
-│   │   └── index.ts
-│   ├── types.ts            # Type definitions
-│   └── extension.ts        # Extension entry point
-├── resources/              # Icons and assets
-├── package.json            # Extension manifest
-└── tsconfig.json          # TypeScript configuration
-```
+- `src/core/`: configuration, connection lifecycle, FTP/SFTP clients, transfers, watcher, and hopping.
+- `src/providers/`: Remote Explorer, Connections, Settings dashboard, documents, comparisons, and transfer queue.
+- `src/commands/`: command registration and context actions.
+- `src/webmaster/`: permissions, checksums, search, backup, cache, and replace tools.
+- `resources/`: webview assets, icons, and local Codicons.
+- `schema/`: `.vscode/sftp.json` validation schema.
 
-## Development Workflow
+## Checks before a commit
 
-### Building
-```bash
+```powershell
 npm run compile
-```
-
-### Watch Mode (for development)
-```bash
-npm run watch
-```
-
-### Linting
-```bash
-npm run lint
-```
-
-### Packaging
-```bash
+npm test -- --run
+npm run bundle
 npm run package
 ```
 
-## Code Style
+For connection or WebView changes, also verify:
 
-- Use TypeScript strict mode
-- Follow existing code formatting
-- Use meaningful variable names
-- Add JSDoc comments for public APIs
-- Keep functions focused and small
+- ITFFTP activates without extension-host errors.
+- **ITFFTP: Open Settings** opens the native VS Code dashboard.
+- Dashboard profile validation and save/reset work.
+- SFTP, FTP, and FTPS failures reach a bounded error state.
+- The Output channel contains activation and connection diagnostics.
+- The basic Connections side panel does not receive credentials.
+- Explorer, editor, and Source Control ITFFTP context actions remain grouped at the bottom.
 
-## Testing
+## Feature and security expectations
 
-### Manual Testing
-1. Run the extension with `F5`
-2. Test all major features:
-   - Connection to different server types
-   - File transfers
-   - Sync operations
-   - Web master tools
+- Keep the historical `stackerftp.*` command and configuration identifiers unless a migration is documented.
+- Treat credentials, private keys, remote paths, and server responses as untrusted or sensitive.
+- Do not log passwords, passphrases, private keys, or raw credential-bearing configuration.
+- Keep connection timeouts bounded and ensure every progress indicator has a completion or failure path.
+- Preserve safe path validation and system-path deletion guards.
+- Prefer focused changes and add a regression test when behavior is not covered by the existing suite.
 
-### Test Checklist
-- [ ] SFTP connection with password
-- [ ] SFTP connection with private key
-- [ ] FTP connection
-- [ ] FTPS connection
-- [ ] Upload file
-- [ ] Download file
-- [ ] Sync to remote
-- [ ] Sync to local
-- [ ] Delete remote file
-- [ ] Create remote folder
-- [ ] Rename remote file
-- [ ] Chmod operation
-- [ ] Checksum calculation
-- [ ] File search
+## Upstream and fork contributions
 
-## Submitting Changes
+When adapting work from the original SFTP lineage or StackerFTP:
 
-### Pull Request Process
+1. Preserve the original authors and project attribution.
+2. Explain the source and license of materially copied code or assets.
+3. Separate upstream-compatible fixes from ITFFTP-specific dashboard, branding, or workflow changes.
+4. Update `README.md` and `CHANGELOG.md` when a user-visible feature or behavior changes.
 
-1. Create a feature branch:
-```bash
-git checkout -b feature/my-new-feature
+## Pull requests
+
+Use a focused branch and a concise conventional commit message:
+
+```powershell
+git checkout -b agent/short-description
+git add path/to/changed/files
+git commit -m "fix: describe the behavior change"
+git push -u origin agent/short-description
 ```
 
-2. Make your changes and commit:
-```bash
-git add .
-git commit -m "feat: add new feature"
-```
+Pull requests should describe the user impact, root cause, files changed, checks run, and any runtime or authenticated-server coverage that remains outstanding.
 
-3. Push to your fork:
-```bash
-git push origin feature/my-new-feature
-```
+## Code style and manual testing
 
-4. Open a Pull Request on GitHub
+- Keep TypeScript strictness enabled, follow the existing formatting, and keep functions focused.
+- Add JSDoc for public APIs and use meaningful names for connection, transfer, and WebView state.
+- Before a release, manually cover password and private-key SFTP, FTP, FTPS, transfers, sync, delete/create/rename, WebMaster tools, dashboard save/reset, timeout handling, and the bottom context-menu placement.
 
-### Commit Message Format
+## Reporting issues
 
-Follow conventional commits:
+Include the VS Code/editor and ITFFTP versions, operating system, server protocol, reproduction steps, expected and actual behavior, and relevant Output-channel messages. Do not include passwords, private keys, passphrases, or credential-bearing configuration.
 
-- `feat:` New feature
-- `fix:` Bug fix
-- `docs:` Documentation changes
-- `style:` Code style changes (formatting)
-- `refactor:` Code refactoring
-- `test:` Test changes
-- `chore:` Build/process changes
+Feature requests should explain the use case, proposed behavior, alternatives considered, and any compatibility impact.
 
-Examples:
-```
-feat: add drag and drop support
-fix: resolve connection timeout issue
-docs: update README with new features
-```
+## Code of conduct
 
-### PR Checklist
+Be respectful, inclusive, and constructive. Welcome newcomers and focus discussions on improving the project.
 
-- [ ] Code builds without errors
-- [ ] Linting passes
-- [ ] Manual testing completed
-- [ ] Documentation updated
-- [ ] CHANGELOG.md updated
-- [ ] Commit messages follow convention
+## Questions
 
-## Reporting Issues
+Open an issue or discussion for project questions and include enough context for the behavior to be reproduced safely.
 
-### Bug Reports
-Include:
-- VS Code version
-- Extension version
-- Operating system
-- Server type (FTP/FTPS/SFTP)
-- Steps to reproduce
-- Expected behavior
-- Actual behavior
-- Error messages/logs
+## License
 
-### Feature Requests
-Include:
-- Use case description
-- Proposed solution
-- Alternative solutions considered
-- Additional context
-
-## Code of Conduct
-
-- Be respectful and inclusive
-- Welcome newcomers
-- Focus on constructive feedback
-- Respect different viewpoints
-
-## Questions?
-
-Feel free to:
-- Open an issue for questions
-- Join discussions in existing issues
-- Contact maintainers
-
-Thank you for contributing! 🎉
+By contributing, you agree that your contribution is provided under the repository's MIT License. See [LICENSE](LICENSE).

@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Utilities Export
+ * ITFFTP - Utilities Export
  */
 
 export * from './helpers';

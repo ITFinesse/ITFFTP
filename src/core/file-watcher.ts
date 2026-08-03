@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - File Watcher
+ * ITFFTP - File Watcher
  * 
  * Monitors local files for changes and automatically syncs with remote
  */

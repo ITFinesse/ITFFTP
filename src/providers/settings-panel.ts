@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Extension Settings Webview
+ * ITFFTP - Extension Settings Webview
  */
 
 import * as vscode from 'vscode';
@@ -56,7 +56,7 @@ export class SettingsPanel implements vscode.Disposable {
   public open(scope?: vscode.Uri): void {
     const resolvedScope = scope || vscode.workspace.workspaceFolders?.[0]?.uri;
     if (!resolvedScope) {
-      vscode.window.showWarningMessage('Open a workspace before editing ITFinesse FTP settings.');
+      vscode.window.showWarningMessage('Open a workspace before editing ITFFTP settings.');
       return;
     }
 
@@ -70,7 +70,7 @@ export class SettingsPanel implements vscode.Disposable {
 
     this.panel = vscode.window.createWebviewPanel(
       'stackerftp.settings',
-      'ITFinesse FTP Settings',
+      'ITFFTP Settings',
       vscode.ViewColumn.Active,
       {
         enableScripts: true,
@@ -195,7 +195,7 @@ export class SettingsPanel implements vscode.Disposable {
 
     await this.sendSettings();
     this.panel?.webview.postMessage({ type: 'saveSuccess' });
-    statusBar.success('ITFinesse FTP settings saved');
+    statusBar.success('ITFFTP settings saved');
 
     if (this.scope && this.onSettingsSaved) {
       await this.onSettingsSaved(this.scope);

@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Remote Explorer Tree Provider
+ * ITFFTP - Remote Explorer Tree Provider
  * 
  * Native VS Code TreeView with full File Icon Theme support
  */
@@ -174,7 +174,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
 
     // Create status bar item for loading indicator
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    this.statusBarItem.name = 'ITFinesse FTP Loading';
+    this.statusBarItem.name = 'ITFFTP Loading';
 
     // Subscribe to connection changes
     connectionManager.onConnectionChanged(() => {

@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Quick Search Panel
+ * ITFFTP - Quick Search Panel
  *
  * Ultra-fast search in a new panel
  */

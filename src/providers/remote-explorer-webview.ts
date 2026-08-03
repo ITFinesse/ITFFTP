@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Remote Explorer WebView Provider
+ * ITFFTP - Remote Explorer WebView Provider
  * 
  * Modern, minimalist file manager with VS Code Codicons
  */
@@ -704,7 +704,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ITFinesse FTP Remote Explorer</title>
+  <title>ITFFTP Remote Explorer</title>
   <link rel="stylesheet" href="${codiconsUri}">
   <style>
     * {
@@ -1723,7 +1723,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
     }
     
     function showNoWorkspace() {
-      emptyState.innerHTML = '<i class="codicon codicon-folder"></i><h3>No Workspace</h3><p>Open a folder to use ITFinesse FTP</p>';
+      emptyState.innerHTML = '<i class="codicon codicon-folder"></i><h3>No Workspace</h3><p>Open a folder to use ITFFTP</p>';
       emptyState.style.display = 'flex';
       fileList.style.display = 'none';
       listHeader.style.display = 'none';

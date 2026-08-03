@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Git Integration
+ * ITFFTP - Git Integration
  * 
  * Git repository integration - detecting changed files
  */

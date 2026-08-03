@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Configuration Manager
+ * ITFFTP - Configuration Manager
  */
 
 import * as vscode from 'vscode';
@@ -135,7 +135,7 @@ export class ConfigManager {
     await vscode.window.showTextDocument(doc);
 
     vscode.window.showInformationMessage(
-      'ITFinesse FTP: Configuration file created. Please update it with your server details.',
+      'ITFFTP: Configuration file created. Please update it with your server details.',
       'Got it'
     );
   }

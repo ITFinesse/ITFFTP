@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Web Master Tools
+ * ITFFTP - Web Master Tools
  */
 
 import * as vscode from 'vscode';

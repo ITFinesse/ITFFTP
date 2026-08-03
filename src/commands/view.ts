@@ -16,7 +16,7 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
 
     const configs = configManager.getConfigs(workspaceRoot);
     if (configs.length === 0) {
-      statusBar.success('No connections configured. Use "ITFinesse FTP: New Connection" to add one.');
+      statusBar.success('No connections configured. Use "ITFFTP: New Connection" to add one.');
       return;
     }
 

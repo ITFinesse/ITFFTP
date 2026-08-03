@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Compare View WebView Provider
+ * ITFFTP - Compare View WebView Provider
  *
  * Provides a split-view interface for comparing local and remote folders
  */

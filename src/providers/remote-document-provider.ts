@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Remote Document Provider
+ * ITFFTP - Remote Document Provider
  * 
  * Virtual document provider for viewing remote files without downloading
  */

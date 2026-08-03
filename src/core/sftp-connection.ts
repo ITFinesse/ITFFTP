@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - SFTP Connection Implementation
+ * ITFFTP - SFTP Connection Implementation
  */
 
 import * as fs from 'fs';

@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Logger Utility
+ * ITFFTP - Logger Utility
  */
 
 import * as vscode from 'vscode';
@@ -20,7 +20,7 @@ class Logger {
   private maxLogs = 1000;
 
   constructor() {
-    this.outputChannel = vscode.window.createOutputChannel('ITFinesse FTP');
+    this.outputChannel = vscode.window.createOutputChannel('ITFFTP');
   }
 
   private formatMessage(entry: LogEntry): string {

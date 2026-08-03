@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Helper Utilities
+ * ITFFTP - Helper Utilities
  */
 
 import * as crypto from 'crypto';

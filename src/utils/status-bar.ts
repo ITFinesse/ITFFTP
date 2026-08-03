@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Status Bar Notifier
+ * ITFFTP - Status Bar Notifier
  * Centralized status bar notifications instead of toast messages
  */
 
@@ -35,9 +35,9 @@ class StatusBarNotifier {
       vscode.StatusBarAlignment.Left,
       99 // Lower priority than connection bar
     );
-    this.statusBarItem.name = 'ITFinesse FTP Notifications';
-    this.statusBarItem.text = '$(output) ITFinesse FTP';
-    this.statusBarItem.tooltip = 'ITFinesse FTP: Click to show output';
+    this.statusBarItem.name = 'ITFFTP Notifications';
+    this.statusBarItem.text = '$(output) ITFFTP';
+    this.statusBarItem.tooltip = 'ITFFTP: Click to show output';
     this.statusBarItem.command = 'stackerftp.showOutput';
     // Do not call show() here - it will show when notification arrives
 
@@ -46,7 +46,7 @@ class StatusBarNotifier {
       vscode.StatusBarAlignment.Left,
       98
     );
-    this.transferStatusBarItem.name = 'ITFinesse FTP Transfers';
+    this.transferStatusBarItem.name = 'ITFFTP Transfers';
     this.transferStatusBarItem.command = 'stackerftp.showTransferQueue';
   }
 
@@ -135,7 +135,7 @@ class StatusBarNotifier {
     const icon = this.getIcon(type);
     this.statusBarItem.text = `${icon} ${text}`;
     this.statusBarItem.color = this.getColor(type);
-    this.statusBarItem.tooltip = `Click to open ITFinesse FTP Output\n${text}`;
+    this.statusBarItem.tooltip = `Click to open ITFFTP Output\n${text}`;
     this.statusBarItem.show();
   }
 
@@ -190,7 +190,7 @@ class StatusBarNotifier {
       vscode.StatusBarAlignment.Left,
       98
     );
-    progressItem.name = `ITFinesse FTP Progress: ${id}`;
+    progressItem.name = `ITFFTP Progress: ${id}`;
     progressItem.text = `$(sync~spin) ${message}`;
     progressItem.tooltip = message;
     progressItem.command = 'stackerftp.showOutput';

@@ -1,6 +1,34 @@
 # Changelog
 
-All notable changes to the "StackerFTP" extension will be documented in this file.
+All notable changes to ITFFTP will be documented in this file. Historical releases retain their original StackerFTP names for provenance.
+
+## [2.0.0] - 2026-08-03
+
+This major release is the ITFinesse fork update maintained by Stephen Stern. It preserves the SFTP and StackerFTP feature set while adding the ITFFTP dashboard, reliability, packaging, and branding work below.
+
+### Added
+
+- **Settings Dashboard**: Added a native VS Code Settings Webview for connection profiles and all ITFFTP workspace preferences, including validation, save, reload, reset, named remotes, sorting, transfer concurrency, watcher behavior, and confirmation controls.
+- **Connection Lifecycle UI**: Added explicit connecting, connected, disconnected, and error states to the basic Connections side panel.
+- **Diagnostics**: Added activation and connection-start logging plus bounded connection failure messages in the ITFFTP Output channel.
+- **Local Webview Assets**: Added packaged Codicon CSS/font assets so dashboards do not depend on an unbundled extension `node_modules` directory.
+
+### Changed
+
+- **Brand**: Rebranded the extension UI and manifest to ITFFTP, publisher ITFinesse, and maintainer Stephen Stern while retaining `stackerftp.*` identifiers for existing workspaces.
+- **Connection Management**: Reduced the side panel to connection status and connect/disconnect actions; profile editing now belongs in the dashboard.
+- **Context Menus**: Moved ITFFTP Explorer, editor, and Source Control context actions into a final bottom group.
+- **Packaging**: Bundled runtime dependencies into the extension artifact and moved build-only dependencies out of the runtime package.
+- **Documentation**: Consolidated the original feature inventory with the upstream SFTP lineage, StackerFTP work, ITFFTP dashboard features, and fork contribution guidance.
+
+### Fixed
+
+- **Activation Crash**: Fixed the VSIX activation failure caused by `ssh2` being externalized without shipping the runtime module. This previously prevented the Connections view, Settings Webview, and Output channel from opening.
+- **Connection Spinner**: Added hard connection timeouts and failure propagation so an unavailable or rejected server cannot leave the UI spinning indefinitely.
+- **Reconnect Storms**: Prevented cleanup after an unsuccessful initial attempt from being treated as a dropped established connection and retried automatically.
+- **Progress Collisions**: Gave simultaneous connection attempts unique progress identifiers instead of sharing one global `connect` indicator.
+- **Credential Exposure**: Stopped the basic Connections side panel from receiving passwords and private-key passphrases in its webview payload.
+- **Webview Runtime**: Removed the dependency on installed Codicon files and packaged the assets required by the Settings, Connections, and Remote Explorer WebViews.
 
 ## [1.2.8] - 2026-03-18
 

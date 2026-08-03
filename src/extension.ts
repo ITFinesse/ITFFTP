@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - VS Code Extension
+ * ITFFTP - VS Code Extension
  * 
  * A professional FTP/SFTP client with file manager and web master tools
  */
@@ -73,7 +73,7 @@ export function wasRecentlyUploaded(filePath: string): boolean {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  logger.info('ITFinesse FTP activation started');
+  logger.info('ITFFTP activation started');
   // 1. Fundamental Command Registration (Always available)
   context.subscriptions.push(
     vscode.commands.registerCommand('stackerftp.showOutput', () => {
@@ -113,7 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Show welcome message
     vscode.window.showInformationMessage(
-      'ITFinesse FTP: Please open a folder to start using SFTP features.',
+      'ITFFTP: Please open a folder to start using SFTP features.',
       'Open Folder'
     ).then(selection => {
       if (selection === 'Open Folder') {
@@ -254,7 +254,7 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  logger.info('ITFinesse FTP extension activated successfully');
+  logger.info('ITFFTP extension activated successfully');
 }
 
 // NOTE: FileSystemProvider for 'stackerftp' scheme was removed as it was
@@ -290,7 +290,7 @@ function scheduleAutoConnect(workspaceRoot: string): void {
     vscode.Uri.file(workspaceRoot)
   );
   if (!configuration.get<boolean>('autoConnect', true)) {
-    logger.info('Auto-connect is disabled in ITFinesse FTP settings');
+    logger.info('Auto-connect is disabled in ITFFTP settings');
     return;
   }
 
@@ -434,7 +434,7 @@ async function startFileWatcher(workspaceRoot: string): Promise<void> {
 }
 
 export function deactivate(): void {
-  logger.info('ITFinesse FTP extension deactivating...');
+  logger.info('ITFFTP extension deactivating...');
 
   for (const timer of autoConnectTimers.values()) {
     clearTimeout(timer);

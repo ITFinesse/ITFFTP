@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Connection Pool
+ * ITFFTP - Connection Pool
  *
  * Manages a pool of connections per server for parallel transfers.
  * Primary connection (used by explorer/stat) remains separate.

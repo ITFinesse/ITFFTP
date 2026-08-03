@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Connection Hopping (Jump Host) Support
+ * ITFFTP - Connection Hopping (Jump Host) Support
  *  
  * Enables connections through intermediate SSH servers (hop/bastion hosts)
  * local -> hop -> target

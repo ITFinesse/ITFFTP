@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Connection Manager
+ * ITFFTP - Connection Manager
  */
 
 import * as vscode from 'vscode';
@@ -102,7 +102,7 @@ export class ConnectionManager {
     const activeConns = this.getAllActiveConnections();
 
     if (activeConns.length === 0) {
-      this.statusBarItem.text = `$(cloud) ITFinesse FTP`;
+      this.statusBarItem.text = `$(cloud) ITFFTP`;
       this.statusBarItem.tooltip = 'Click to select connection';
       this.statusBarItem.show();
       return;

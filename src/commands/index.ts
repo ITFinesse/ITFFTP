@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Commands
+ * ITFFTP - Commands
  */
 
 import * as vscode from 'vscode';

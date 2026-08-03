@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Transfer Queue Tree Provider
+ * ITFFTP - Transfer Queue Tree Provider
  * Native VS Code TreeView for managing file transfers
  */
 

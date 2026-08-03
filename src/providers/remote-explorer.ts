@@ -1,5 +1,5 @@
 /**
- * ITFinesse FTP - Remote Explorer TreeDataProvider
+ * ITFFTP - Remote Explorer TreeDataProvider
  */
 
 import * as vscode from 'vscode';
