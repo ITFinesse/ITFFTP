@@ -277,9 +277,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
                 : await this.handleCollision(item.remotePath, 'remote', targetType === 'directory');
             }
             if (action === 'skip') {
-              throw new Error(item.config.syncMode === 'update'
-                ? targetsMatch ? 'Skipped: Remote target already synced' : 'Skipped: Remote target already exists'
-                : 'Skipped: Remote target exists');
+              throw new Error('Skipped: Files Match');
             }
             if (targetType === 'directory') {
               await connection.rmdir(item.remotePath, true);
@@ -340,9 +338,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
                 : await this.handleCollision(item.localPath, 'local', targetType === 'directory');
             }
             if (action === 'skip') {
-              throw new Error(item.config.syncMode === 'update'
-                ? targetsMatch ? 'Skipped: Local target already synced' : 'Skipped: Local target already exists'
-                : 'Skipped: Local target exists');
+              throw new Error('Skipped: Files Match');
             }
             if (targetType === 'directory') {
               await fs.promises.rm(item.localPath, { recursive: true, force: true });
@@ -372,13 +368,22 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
         item.progress = 100;
         if ((item as any).resolve) (item as any).resolve();
       } catch (error: any) {
-        if (error?.code === 'TRANSFER_TIMEOUT' || String(error?.message || '').includes('Transfer timeout')) {
-          timedOut = true;
+        const message = String(error?.message || error || 'Unknown transfer error');
+        if (message.startsWith('Skipped:')) {
+          item.status = 'completed';
+          item.progress = 100;
+          item.error = message;
+          if ((item as any).resolve) (item as any).resolve();
+          logger.debug(`Transfer skipped: ${item.remotePath}`, { reason: message });
+        } else {
+          if (error?.code === 'TRANSFER_TIMEOUT' || String(error?.message || '').includes('Transfer timeout')) {
+            timedOut = true;
+          }
+          item.status = 'error';
+          item.error = message;
+          logger.error(`Transfer failed: ${item.remotePath}`, error);
+          if ((item as any).reject) (item as any).reject(error);
         }
-        item.status = 'error';
-        item.error = error.message;
-        logger.error(`Transfer failed: ${item.remotePath}`, error);
-        if ((item as any).reject) (item as any).reject(error);
       } finally {
         if (timedOut && pooledConnection && item.config) {
           const primary = connectionManager.getConnection(item.config);
