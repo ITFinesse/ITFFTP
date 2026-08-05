@@ -256,8 +256,21 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             if (item.config.syncMode === 'update' && targetType !== 'directory') {
               remoteStat ??= await connection.stat(item.remotePath);
               const localStat = await fs.promises.stat(item.localPath);
-              targetsMatch = remoteStat?.size === localStat.size;
-              action = remoteStat?.modifyTime && localStat.mtime > remoteStat.modifyTime ? 'overwrite' : 'skip';
+              const remoteModify = remoteStat?.modifyTime instanceof Date ? remoteStat.modifyTime.getTime() : Number(remoteStat?.modifyTime || 0);
+              const remoteSize = Number.isFinite(item.size as number) ? item.size : remoteStat?.size;
+              targetsMatch = typeof remoteSize === 'number' && remoteSize === localStat.size;
+              const localMs = localStat.mtime.getTime();
+              const remoteTimestampUsable = item.config.protocol !== 'ftp'
+                && item.config.protocol !== 'ftps'
+                && remoteModify > 0
+                && Math.abs(remoteModify - localMs) > 1500;
+              if (!targetsMatch) {
+                action = 'overwrite';
+              } else if (remoteTimestampUsable && remoteModify <= localMs + 1500) {
+                action = 'skip';
+              } else {
+                action = remoteTimestampUsable ? 'overwrite' : 'skip';
+              }
             } else {
               action = item.config.collisionPolicy && item.config.collisionPolicy !== 'ask'
                 ? item.config.collisionPolicy === 'overwrite' ? 'overwrite' : 'skip'
@@ -265,7 +278,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             }
             if (action === 'skip') {
               throw new Error(item.config.syncMode === 'update'
-                ? targetsMatch ? 'Skipped: Remote target already matches' : 'Skipped: Remote target is newer'
+                ? targetsMatch ? 'Skipped: Remote target already synced' : 'Skipped: Remote target already exists'
                 : 'Skipped: Remote target exists');
             }
             if (targetType === 'directory') {
@@ -306,8 +319,21 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             if (item.config.syncMode === 'update' && targetType !== 'directory') {
               remoteStat = await connection.stat(item.remotePath);
               const localStat = await fs.promises.stat(item.localPath);
-              targetsMatch = remoteStat?.size === localStat.size;
-              action = remoteStat?.modifyTime && remoteStat.modifyTime > localStat.mtime ? 'overwrite' : 'skip';
+              const remoteModify = remoteStat?.modifyTime instanceof Date ? remoteStat.modifyTime.getTime() : Number(remoteStat?.modifyTime || 0);
+              const remoteSize = Number.isFinite(item.size as number) ? item.size : remoteStat?.size;
+              targetsMatch = typeof remoteSize === 'number' && remoteSize === localStat.size;
+              const localMs = localStat.mtime.getTime();
+              const remoteTimestampUsable = item.config.protocol !== 'ftp'
+                && item.config.protocol !== 'ftps'
+                && remoteModify > 0
+                && Math.abs(remoteModify - localMs) > 1500;
+              if (!targetsMatch) {
+                action = 'overwrite';
+              } else if (remoteTimestampUsable && remoteModify <= localMs + 1500) {
+                action = 'skip';
+              } else {
+                action = remoteTimestampUsable ? 'overwrite' : 'skip';
+              }
             } else {
               action = item.config.collisionPolicy && item.config.collisionPolicy !== 'ask'
                 ? item.config.collisionPolicy === 'overwrite' ? 'overwrite' : 'skip'
@@ -315,7 +341,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             }
             if (action === 'skip') {
               throw new Error(item.config.syncMode === 'update'
-                ? targetsMatch ? 'Skipped: Local target already matches' : 'Skipped: Local target is newer'
+                ? targetsMatch ? 'Skipped: Local target already synced' : 'Skipped: Local target already exists'
                 : 'Skipped: Local target exists');
             }
             if (targetType === 'directory') {

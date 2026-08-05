@@ -360,7 +360,7 @@ export class SettingsPanel implements vscode.Disposable {
           await this.handleDiffAction(message.direction, message.direction === 'upload' ? 'local' : 'remote', message.path, message.connection);
           break;
         case 'syncAllChanged':
-          await vscode.commands.executeCommand(message.direction === 'down' ? 'stackerftp.syncToLocal' : 'stackerftp.syncToRemote');
+          await this.syncChanged(message.direction === 'down' ? 'down' : 'up');
           break;
         case 'testConnection':
           await this.testConnection(message.connection);
@@ -429,6 +429,13 @@ export class SettingsPanel implements vscode.Disposable {
     this.sendComparisonSnapshot();
     logger.info('ITFFTP dashboard settings sent');
     void this.sendWorkspaceInventory(workspaceFilesPromise);
+  }
+
+  private withDashboardSyncMode(config: FTPConfig): FTPConfig {
+    return {
+      ...config,
+      syncMode: 'full'
+    };
   }
 
   private async sendWorkspaceInventory(workspaceFilesPromise: Promise<string[]>): Promise<void> {
@@ -655,6 +662,110 @@ export class SettingsPanel implements vscode.Disposable {
     await this.scanComparison(config, relativeDirectory);
   }
 
+  private async syncChanged(direction: 'up' | 'down'): Promise<void> {
+    if (!this.scope) throw new Error('No workspace is selected.');
+    const config = configManager.getActiveConfig(this.scope.fsPath) || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
+    if (!config) throw new Error('Select a host before syncing.');
+    if (!this.latestDiffRecords.size) throw new Error('No comparison data available. Open the diff viewer first.');
+
+    const changedStatuses = new Set(['modified', 'missing-local', 'missing-remote', 'type-changed']);
+    const candidates = [...this.latestDiffRecords.values()].filter(record => {
+      if (!changedStatuses.has(record.status)) return false;
+      if (direction === 'up') {
+        return record.status === 'modified' || record.status === 'missing-remote' || record.status === 'type-changed';
+      }
+      return record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed';
+    });
+
+    if (candidates.length === 0) {
+      statusBar.info(`No changed files to sync ${direction === 'up' ? 'up' : 'down'}.`);
+      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files to sync ${direction === 'up' ? 'up' : 'down'}` });
+      return;
+    }
+
+    const connection = await connectionManager.connect(config);
+    const transferConfig = this.withDashboardSyncMode(config);
+    const remoteRoot = (config.remotePath || '/').replace(/\/$/, '');
+    const actions: Array<{ path: string; promise: Promise<unknown> }> = [];
+    for (const candidate of candidates) {
+      const filePath = candidate.path.replace(/\/$/, '');
+      if (!filePath) continue;
+      const segments = filePath.split('/');
+      const localUri = vscode.Uri.joinPath(this.scope, ...segments);
+      const remotePath = `${remoteRoot}/${filePath}`;
+      if (direction === 'up' && candidate.local) {
+        if (candidate.type === 'directory') {
+          actions.push({ path: filePath, promise: transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, transferConfig) });
+        } else {
+          actions.push({
+            path: filePath,
+            promise: transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
+              size: candidate.local.size,
+              targetExists: Boolean(candidate.remote),
+              targetType: 'file'
+            })
+          });
+        }
+      } else if (direction === 'down' && candidate.remote) {
+        if (candidate.type === 'directory') {
+          actions.push({ path: filePath, promise: transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, transferConfig) });
+        } else {
+          actions.push({
+            path: filePath,
+            promise: transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
+              size: candidate.remote.size,
+              targetExists: Boolean(candidate.local),
+              targetType: 'file'
+            })
+          });
+        }
+      } else {
+        continue;
+      }
+    }
+
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `${direction === 'up' ? 'Uploading' : 'Downloading'} ${candidates.length} changed files`, percentage: 0 });
+    if (actions.length === 0) {
+      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No valid entries for ${direction === 'up' ? 'upload' : 'download'}` });
+      return;
+    }
+
+    try {
+      const settled = await Promise.allSettled(actions.map(entry => entry.promise));
+      const completedPaths = actions.filter((_, index) => settled[index].status === 'fulfilled').map(entry => entry.path);
+      if (completedPaths.length > 0) {
+        this.diffDirectoryCache.clear();
+        await this.refreshAfterTransfer(completedPaths);
+      }
+      if (completedPaths.length < actions.length) {
+        const failedCount = actions.length - completedPaths.length;
+        statusBar.warn(`Sync completed with ${failedCount} failure${failedCount === 1 ? '' : 's'}`);
+      }
+      const message = direction === 'up' ? 'Uploaded' : 'Downloaded';
+      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `${message} ${completedPaths.length} changed file${completedPaths.length === 1 ? '' : 's'}` });
+    } finally {
+      // No-op. Sync completion status is posted above to keep the UI deterministic.
+    }
+  }
+
+  private async refreshAfterTransfer(syncedPaths: string[]): Promise<void> {
+    if (!this.scope) return;
+    const config = configManager.getActiveConfig(this.scope.fsPath) || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
+    if (!config) return;
+
+    for (const syncedPath of syncedPaths) {
+      const pathToSync = syncedPath.replace(/\/$/, '');
+      const prefix = `${pathToSync}`;
+      for (const dirtyPath of [...this.localDirtyPaths]) {
+        if (dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`)) {
+          this.localDirtyPaths.delete(dirtyPath);
+        }
+      }
+    }
+    this.scheduleComparisonCacheWrite(config);
+    await this.loadRemoteDiff(config);
+  }
+
   private async loadRemoteDiffDirectory(config: FTPConfig, relativeDirectory: string, background = false): Promise<Array<{ path: string; type: 'file' | 'directory'; status: string; size?: number; modifyTime?: number }>> {
     try {
       const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$|(?<!^)\/+/g, '/').replace(/\/$/, '') || '/';
@@ -765,7 +876,10 @@ export class SettingsPanel implements vscode.Disposable {
           });
           if (type === 'directory') queue.push(path);
         }
-        for (const record of records.values()) record.status = this.diffStatus(record);
+        for (const record of records.values()) {
+          record.status = this.diffStatus(record);
+          if (record.status === 'same') this.localDirtyPaths.delete(record.path);
+        }
         this.latestDiffRecords.clear();
         for (const [path, record] of records) this.latestDiffRecords.set(path, record);
         this.panel?.webview.postMessage({ type: 'diffBatch', records: [...records.values()], scannedDirectories: visited.size, pendingDirectories: queue.length, complete: queue.length === 0 });
@@ -869,19 +983,29 @@ export class SettingsPanel implements vscode.Disposable {
     const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig() || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
     if (!config) throw new Error('Select a host before using this action.');
     const connection = await connectionManager.connect(config);
+    const transferConfig = this.withDashboardSyncMode(config);
     const remoteRoot = (config.remotePath || '/').replace(/\/$/, '');
     const remotePath = `${remoteRoot}/${filePath.replace(/\/$/, '')}`;
+    const record = this.latestDiffRecords.get(filePath);
     const localUri = vscode.Uri.joinPath(this.scope, ...relativeSegments);
     if (action === 'upload' && direction === 'local') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Uploading ${filePath}`, percentage: 0 });
-      if (isDirectory) await transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, config);
-      else await transferManager.uploadFile(connection, localUri.fsPath, remotePath, config);
+      if (isDirectory) await transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, transferConfig);
+      else await transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
+        size: record?.local?.size,
+        targetExists: Boolean(record?.remote),
+        targetType: 'file'
+      });
     } else if (action === 'download' && direction === 'remote') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Downloading ${filePath}`, percentage: 0 });
       if (isDirectory) {
-        const result = await transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, config);
+        const result = await transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, transferConfig);
         if (result.failed.length) throw new Error(`Downloaded ${result.downloaded.length} files; ${result.failed.length} failed. Check the ITFFTP output for details.`);
-      } else await transferManager.downloadFile(connection, remotePath, localUri.fsPath, config);
+      } else await transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
+        size: record?.remote?.size,
+        targetExists: Boolean(record?.local),
+        targetType: 'file'
+      });
     }
     else if (action === 'delete') {
       const choice = await vscode.window.showWarningMessage(`Delete ${filePath}?`, { modal: true }, 'Delete');
