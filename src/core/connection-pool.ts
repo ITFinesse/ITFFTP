@@ -29,6 +29,8 @@ const MAX_POOL_SIZE = 4;
 export class ConnectionPool {
   private pools: Map<string, ServerPool> = new Map();
   private idleTimer: NodeJS.Timeout | null = null;
+  private readonly debugThrottleMs = 2000;
+  private readonly debugState = new Map<string, { lastEmittedAt: number; suppressed: number }>();
 
   constructor() {
     this.startIdleCleanup();
@@ -51,6 +53,26 @@ export class ConnectionPool {
     }
   }
 
+  private logPoolDebug(message: string, host: string, eventKey: string, trackSuppressed = true): void {
+    const key = `${host}:${eventKey}`;
+    const now = Date.now();
+    const existing = this.debugState.get(key);
+    if (!existing || now - existing.lastEmittedAt >= this.debugThrottleMs) {
+      const suffix = existing && existing.suppressed > 0 ? ` (${existing.suppressed} suppressed)` : '';
+      logger.debug(`${message}${suffix}`);
+      this.debugState.set(key, { lastEmittedAt: now, suppressed: 0 });
+      return;
+    }
+
+    if (trackSuppressed) {
+      existing.suppressed += 1;
+      this.debugState.set(key, existing);
+    } else {
+      logger.debug(message);
+      this.debugState.set(key, { lastEmittedAt: now, suppressed: 0 });
+    }
+  }
+
   /**
    * Acquire a pooled connection for transfers.
    * Returns an existing idle connection or creates a new one up to poolSize.
@@ -70,7 +92,7 @@ export class ConnectionPool {
       if (!entry.inUse && entry.connection.connected) {
         entry.inUse = true;
         entry.lastUsed = Date.now();
-        logger.debug(`Pool: reusing connection for ${config.host} (${pool.entries.length} in pool)`);
+        this.logPoolDebug(`Pool: reusing connection for ${config.host} (${pool.entries.length} in pool)`, config.host, 'reusing');
         return entry.connection;
       }
     }
@@ -90,7 +112,7 @@ export class ConnectionPool {
           lastUsed: Date.now()
         };
         pool.entries.push(entry);
-        logger.debug(`Pool: new connection for ${config.host} (${pool.entries.length}/${maxSize})`);
+        this.logPoolDebug(`Pool: new connection for ${config.host} (${pool.entries.length}/${maxSize})`, config.host, 'new');
         return connection;
       } catch (error) {
         logger.error(`Pool: failed to create connection for ${config.host}`, error);
@@ -101,7 +123,7 @@ export class ConnectionPool {
     }
 
     // All connections busy - wait for one to become available
-    logger.debug(`Pool: all ${maxSize} connections busy for ${config.host}, waiting...`);
+    this.logPoolDebug(`Pool: all ${maxSize} connections busy for ${config.host}, waiting...`, config.host, 'wait');
     return this.waitForAvailable(pool, config);
   }
 
@@ -119,11 +141,11 @@ export class ConnectionPool {
         if (!connection.connected) {
           // Dead connection - remove from pool immediately
           pool.entries.splice(i, 1);
-          logger.debug(`Pool: removed dead connection for ${config.host}`);
+          this.logPoolDebug(`Pool: removed dead connection for ${config.host}`, config.host, 'removed');
         } else {
           entry.inUse = false;
           entry.lastUsed = Date.now();
-          logger.debug(`Pool: released connection for ${config.host}`);
+          this.logPoolDebug(`Pool: released connection for ${config.host}`, config.host, 'released');
         }
         return;
       }
@@ -144,13 +166,13 @@ export class ConnectionPool {
           await entry.connection.disconnect();
         }
       } catch (error) {
-        logger.debug(`Pool: error draining connection for ${config.host}`, error);
+        this.logPoolDebug(`Pool: error draining connection for ${config.host}`, config.host, 'drain-error', false);
       }
     });
 
     await Promise.all(disconnectPromises);
     this.pools.delete(key);
-    logger.debug(`Pool: drained all connections for ${config.host}`);
+    this.logPoolDebug(`Pool: drained all connections for ${config.host}`, config.host, 'drained', false);
   }
 
   /**
@@ -201,7 +223,7 @@ export class ConnectionPool {
             entry.connection.disconnect().catch(() => {});
             const idx = pool.entries.indexOf(entry);
             if (idx !== -1) pool.entries.splice(idx, 1);
-            logger.debug(`Pool: closed idle connection for ${pool.config.host}`);
+            this.logPoolDebug(`Pool: closed idle connection for ${pool.config.host}`, pool.config.host, 'idle');
           }
         }
       }
