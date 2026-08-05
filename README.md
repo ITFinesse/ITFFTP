@@ -4,7 +4,23 @@ ITFFTP is a VS Code FTP, FTPS, and SFTP client maintained by Stephen Stern under
 
 This repository preserves the feature set developed through the original SFTP project lineage, the StackerFTP project, and this ITFinesse fork.
 
-This release is **ITFFTP 2.0.0**, the ITFinesse-branded major release containing the dashboard, connection reliability, packaging, and menu-placement refactors described in [CHANGELOG.md](CHANGELOG.md).
+This release is **ITFFTP 2.1.0**, the ITFinesse-branded major release containing the dashboard, connection reliability, packaging, and menu-placement refactors described in [CHANGELOG.md](CHANGELOG.md).
+
+## Dashboard screenshots
+
+These screenshots are intentionally redacted: hostnames, connection names, usernames, and credentials are excluded or blurred.
+
+### Main dashboard
+
+![ITFFTP main dashboard](./exec-df99c0a6-6ca9-451c-b256-d6f9cb26ccb7.png)
+
+### Dashboard sections covered
+
+- Hosts (multiple named remote locations, add/remove/export/import)
+- Settings (sync, overwrite, and file-watch options)
+- Ignore rules (local workspace exclusions + wildcard patterns)
+- Diff viewer (local ↔ remote tree with file actions)
+- Analytics (project transfer history and activity graphs)
 
 ## What ITFFTP provides
 
