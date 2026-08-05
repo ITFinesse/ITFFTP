@@ -15,6 +15,8 @@ export interface HopConfig {
 
 export interface FTPConfig {
   name?: string;
+  /** The location selected by default when a workspace has multiple hosts. */
+  default?: boolean;
   host: string;
   port?: number;
   protocol: Protocol;
@@ -28,6 +30,13 @@ export interface FTPConfig {
   downloadOnOpen?: boolean;
   remoteExplorerOrder?: 'name' | 'size' | 'date' | 'type';
   syncMode?: 'update' | 'full';
+  syncOption?: {
+    delete?: boolean;
+    skipCreate?: boolean;
+    ignoreExisting?: boolean;
+    update?: boolean;
+  };
+  collisionPolicy?: 'ask' | 'overwrite' | 'skip';
   ignore?: string[];
   watcher?: boolean | {
     files: string;

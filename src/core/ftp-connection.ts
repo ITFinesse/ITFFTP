@@ -14,6 +14,7 @@ import { normalizeRemotePath } from '../utils/helpers';
 
 export class FTPConnection extends BaseConnection {
   private client: Client;
+  private keepaliveTimer: NodeJS.Timeout | undefined;
 
   constructor(config: FTPConfig) {
     super(config);
@@ -41,6 +42,7 @@ export class FTPConnection extends BaseConnection {
 
       this._connected = true;
       this._currentPath = await this.client.pwd();
+      this.startKeepalive();
 
       logger.info(`FTP${secure ? 'S' : ''} connected to ${this.config.host}:${this.config.port || 21}`);
       this.emit('connected');
@@ -51,9 +53,24 @@ export class FTPConnection extends BaseConnection {
   }
 
   async disconnect(): Promise<void> {
+    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = undefined;
     this.client.close();
     this._connected = false;
     this.emit('disconnected');
+  }
+
+  private startKeepalive(): void {
+    const interval = this.config.keepalive ?? 300000;
+    if (interval <= 0) return;
+    this.keepaliveTimer = setInterval(() => {
+      if (!this.connected) return;
+      void this.enqueue(async () => {
+        try { await this.client.send('NOOP'); }
+        catch (error) { logger.debug(`FTP keepalive failed for ${this.config.host}`, error); }
+      });
+    }, interval);
+    this.keepaliveTimer.unref?.();
   }
 
   async list(remotePath: string): Promise<FileEntry[]> {
@@ -92,7 +109,9 @@ export class FTPConnection extends BaseConnection {
               name: item.name,
               type,
               size: item.size || 0,
-              modifyTime: item.modifiedAt || new Date(),
+              // A missing FTP timestamp is unknown, not the current time.
+              // Consumers can then fall back to size comparison safely.
+              modifyTime: item.modifiedAt || new Date(0),
               rights: {
                 user: user !== undefined ? String(user) : '',
                 group: group !== undefined ? String(group) : '',
@@ -244,6 +263,20 @@ export class FTPConnection extends BaseConnection {
     }
   }
 
+  async setModifyTime(remotePath: string, modifyTime: Date): Promise<boolean> {
+    return this.enqueue(async () => {
+      const stamp = modifyTime.toISOString().replace(/[-:T]/g, '').replace(/\.\d{3}Z$/, '');
+      try {
+        // MFMT is supported by common FTP servers and uses UTC YYYYMMDDHHMMSS.
+        await this.client.send(`MFMT ${stamp} ${remotePath}`);
+        return true;
+      } catch (error) {
+        logger.debug(`FTP server does not support preserving timestamps for ${remotePath}`, error);
+        return false;
+      }
+    });
+  }
+
   async delete(remotePath: string): Promise<void> {
     return this.enqueue(async () => {
       try {
@@ -368,8 +401,8 @@ export class FTPConnection extends BaseConnection {
         // Her durumda temizle
         try {
           await fs.promises.unlink(tempPath);
-        } catch (cleanupError) {
-          logger.warn('Failed to cleanup temp file', cleanupError);
+        } catch (cleanupError: any) {
+          if (cleanupError?.code !== 'ENOENT') logger.warn('Failed to cleanup temp file', cleanupError);
         }
       }
     });
@@ -393,8 +426,8 @@ export class FTPConnection extends BaseConnection {
         // Her durumda temizle
         try {
           await fs.promises.unlink(tempPath);
-        } catch (cleanupError) {
-          logger.warn('Failed to cleanup temp file', cleanupError);
+        } catch (cleanupError: any) {
+          if (cleanupError?.code !== 'ENOENT') logger.warn('Failed to cleanup temp file', cleanupError);
         }
       }
     });

@@ -76,7 +76,7 @@ export class ConfigManager {
           uploadOnSave: false,
           syncMode: 'update' as const,
           connTimeout: 10000,
-          keepalive: 10000,
+          keepalive: 300000,
           passive: true,
           secure: false,
           autoReconnect: vsConfig.get<boolean>('autoReconnect', true),
@@ -147,6 +147,9 @@ export class ConfigManager {
   getActiveConfig(workspaceRoot: string): FTPConfig | undefined {
     const configs = this.getConfigs(workspaceRoot);
     if (configs.length === 0) return undefined;
+
+    const defaultHost = configs.find(config => config.default);
+    if (defaultHost) return defaultHost;
 
     if (configs.length === 1) return configs[0];
 

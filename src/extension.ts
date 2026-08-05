@@ -20,11 +20,14 @@ import { fileWatcherManager } from './core/file-watcher';
 import { matchesPattern } from './utils/helpers';
 import { TransferQueueTreeProvider } from './providers/transfer-queue-tree';
 import { SettingsPanel } from './providers/settings-panel';
+import { DashboardLauncherProvider } from './providers/dashboard-launcher';
+import { AnalyticsStore } from './core/analytics-store';
 
 let remoteExplorerProvider: RemoteExplorerWebviewProvider;
 let remoteTreeProvider: RemoteExplorerTreeProvider;
 let connectionFormProvider: ConnectionFormProvider;
 let remoteDocumentProvider: RemoteDocumentProvider;
+let settingsPanelProvider: SettingsPanel;
 
 import { ProviderContainer } from './commands/index';
 
@@ -44,7 +47,10 @@ const autoUploadConfirmedHosts: Set<string> = new Set();
 const recentlyUploadedFiles: Map<string, number> = new Map();
 const UPLOAD_TRACKING_DURATION_MS = 2000; // 2 seconds
 const AUTO_CONNECT_DELAY_MS = 1500;
+const AUTO_CONNECT_RETRY_DELAY_MS = 3000;
+const MAX_AUTO_CONNECT_RETRIES = 1;
 const autoConnectTimers: Map<string, NodeJS.Timeout> = new Map();
+const autoConnectRetries: Map<string, number> = new Map();
 
 /**
  * Mark a file as recently uploaded to prevent duplicate uploads
@@ -74,6 +80,9 @@ export function wasRecentlyUploaded(filePath: string): boolean {
 
 export function activate(context: vscode.ExtensionContext): void {
   logger.info('ITFFTP activation started');
+  const analyticsStore = new AnalyticsStore(context.globalStorageUri);
+  context.subscriptions.push(analyticsStore);
+  transferManager.on('transferComplete', item => { void analyticsStore.record(item); });
   // 1. Fundamental Command Registration (Always available)
   context.subscriptions.push(
     vscode.commands.registerCommand('stackerftp.showOutput', () => {
@@ -89,12 +98,20 @@ export function activate(context: vscode.ExtensionContext): void {
     connectionFormProvider?.refresh();
     remoteTreeProvider?.refresh();
     scheduleAutoConnect(scope.fsPath);
-  });
+  }, analyticsStore, context.globalStorageUri);
+  settingsPanelProvider = settingsPanel;
+  context.subscriptions.push(connectionManager.onConnectionChanged(() => {
+    const scope = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!scope) return;
+    const active = configManager.getActiveConfig(scope.fsPath);
+    if (active && connectionManager.isConnected(active)) settingsPanel.scheduleBackgroundRefresh(active);
+  }));
   providerContainer.settingsPanel = settingsPanel;
+  const dashboardLauncher = new DashboardLauncherProvider(() => settingsPanel.open());
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
-      ConnectionFormProvider.viewType,
-      connectionFormProvider
+      DashboardLauncherProvider.viewType,
+      dashboardLauncher
     ),
     settingsPanel,
     vscode.commands.registerCommand('stackerftp.openSettings', () => {
@@ -139,14 +156,8 @@ export function activate(context: vscode.ExtensionContext): void {
   remoteTreeProvider = new RemoteExplorerTreeProvider(workspaceRoot);
   providerContainer.remoteExplorer = remoteTreeProvider;
 
-  const treeView = vscode.window.createTreeView('stackerftp.remoteExplorerTree', {
-    treeDataProvider: remoteTreeProvider,
-    showCollapseAll: true,
-    canSelectMany: true
-  });
-
-  providerContainer.treeView = treeView;
-  context.subscriptions.push(treeView);
+  // The dashboard is the only ITFFTP surface. Keep the provider available to
+  // transfer commands, but do not create a classic explorer side-panel view.
 
   // 7. Register viewContent command
   context.subscriptions.push(
@@ -211,7 +222,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // 9. Startup Tasks
   // Load the config before starting the watcher or scheduling auto-connect.
-  void loadConfiguration(workspaceRoot).then(() => startFileWatcher(workspaceRoot));
+  void loadConfiguration(workspaceRoot).then(() => {
+    settingsPanel.initialize(vscode.Uri.file(workspaceRoot));
+    return startFileWatcher(workspaceRoot);
+  });
 
   // 10. Event Listeners (Workspace changes, Save)
   context.subscriptions.push(
@@ -223,6 +237,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       for (const added of event.added) {
         await loadConfiguration(added.uri.fsPath);
+        settingsPanel.initialize(added.uri);
         await startFileWatcher(added.uri.fsPath);
       }
     }),
@@ -328,7 +343,11 @@ async function autoConnectConfiguredServer(workspaceRoot: string): Promise<void>
   if (!configuration.get<boolean>('autoConnect', true)) return;
 
   const config = configManager.getActiveConfig(workspaceRoot);
-  if (!config || connectionManager.isConnected(config)) return;
+  if (!config) return;
+  if (connectionManager.isConnected(config)) {
+    settingsPanelProvider?.scheduleBackgroundRefresh(config);
+    return;
+  }
 
   // Avoid an unsolicited password prompt during startup. Users can connect
   // manually from the panel when credentials have not been stored yet.
@@ -340,11 +359,23 @@ async function autoConnectConfiguredServer(workspaceRoot: string): Promise<void>
   try {
     logger.info(`Auto-connecting to ${config.name || config.host}`);
     await connectionManager.connect(config);
+    settingsPanelProvider?.scheduleBackgroundRefresh(config);
+    autoConnectRetries.delete(workspaceRoot);
     remoteTreeProvider?.refresh();
     connectionFormProvider?.refresh();
   } catch (error: any) {
     logger.error(`Auto-connect failed for ${config.host}`, error);
     statusBar.error(`Auto-connect failed: ${error.message || error}`, true);
+    const attempts = autoConnectRetries.get(workspaceRoot) || 0;
+    if (configuration.get<boolean>('autoReconnect', true) && attempts < MAX_AUTO_CONNECT_RETRIES) {
+      autoConnectRetries.set(workspaceRoot, attempts + 1);
+      logger.warn(`Retrying initial connection to ${config.name || config.host} in ${AUTO_CONNECT_RETRY_DELAY_MS}ms`);
+      const retryTimer = setTimeout(() => {
+        autoConnectTimers.delete(workspaceRoot);
+        void autoConnectConfiguredServer(workspaceRoot);
+      }, AUTO_CONNECT_RETRY_DELAY_MS);
+      autoConnectTimers.set(workspaceRoot, retryTimer);
+    }
   }
 }
 

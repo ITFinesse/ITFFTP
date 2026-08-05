@@ -20,6 +20,15 @@ export interface TransferProgress {
   percentage: number;
 }
 
+export interface TransferAnalytics {
+  uploadedFiles: number;
+  downloadedFiles: number;
+  uploadedBytes: number;
+  downloadedBytes: number;
+  averageDurationMs: number;
+  days: Array<{ date: string; uploadedBytes: number; downloadedBytes: number; uploadedFiles: number; downloadedFiles: number }>;
+}
+
 export class TransferManager extends EventEmitter implements vscode.Disposable {
   private queue: TransferItem[] = [];
   private active = false;
@@ -31,6 +40,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
   private queueUpdateTimeout: NodeJS.Timeout | undefined;
   private _activeCount = 0;
   private completionResolve: (() => void) | null = null;
+  private transferHistory: TransferItem[] = [];
   private static readonly TRANSFER_TIMEOUT_MS = 180000; // 3 minutes safeguard against stalled transfers
 
 
@@ -227,10 +237,11 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           // Optimization: Bypass stat if metadata provided or session already set
           let exists = item.targetExists;
           let targetType = item.targetType;
+          let remoteStat: Awaited<ReturnType<BaseConnection['stat']>> | undefined;
 
-          if (exists === undefined && this.sessionCollisionAction === 'ask') {
+          if (exists === undefined) {
             try {
-              const remoteStat = await connection.stat(item.remotePath);
+              remoteStat = await connection.stat(item.remotePath);
               exists = !!remoteStat;
               targetType = remoteStat?.type;
             } catch {
@@ -239,10 +250,23 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             }
           }
 
-          if (exists && this.sessionCollisionAction === 'ask') {
-            const action = await this.handleCollision(item.remotePath, 'remote', targetType === 'directory');
+          if (exists) {
+            let action: 'overwrite' | 'skip';
+            let targetsMatch = false;
+            if (item.config.syncMode === 'update' && targetType !== 'directory') {
+              remoteStat ??= await connection.stat(item.remotePath);
+              const localStat = await fs.promises.stat(item.localPath);
+              targetsMatch = remoteStat?.size === localStat.size;
+              action = remoteStat?.modifyTime && localStat.mtime > remoteStat.modifyTime ? 'overwrite' : 'skip';
+            } else {
+              action = item.config.collisionPolicy && item.config.collisionPolicy !== 'ask'
+                ? item.config.collisionPolicy === 'overwrite' ? 'overwrite' : 'skip'
+                : await this.handleCollision(item.remotePath, 'remote', targetType === 'directory');
+            }
             if (action === 'skip') {
-              throw new Error('Skipped: Remote target exists');
+              throw new Error(item.config.syncMode === 'update'
+                ? targetsMatch ? 'Skipped: Remote target already matches' : 'Skipped: Remote target is newer'
+                : 'Skipped: Remote target exists');
             }
             if (targetType === 'directory') {
               await connection.rmdir(item.remotePath, true);
@@ -254,12 +278,19 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             TransferManager.TRANSFER_TIMEOUT_MS,
             `upload ${path.basename(item.localPath)}`
           );
+          try {
+            const localStat = await fs.promises.stat(item.localPath);
+            await connection.setModifyTime(item.remotePath, localStat.mtime);
+          } catch (error) {
+            logger.debug(`Could not preserve uploaded timestamp for ${item.remotePath}`, error);
+          }
         } else {
           // Optimization: Bypass stat if metadata provided or session already set
           let exists = item.targetExists;
           let targetType = item.targetType;
+          let remoteStat: Awaited<ReturnType<BaseConnection['stat']>> | undefined;
 
-          if (exists === undefined && this.sessionCollisionAction === 'ask') {
+          if (exists === undefined) {
             try {
               const stats = await fs.promises.stat(item.localPath);
               exists = true;
@@ -269,10 +300,23 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             }
           }
 
-          if (exists && this.sessionCollisionAction === 'ask') {
-            const action = await this.handleCollision(item.localPath, 'local', targetType === 'directory');
+          if (exists) {
+            let action: 'overwrite' | 'skip';
+            let targetsMatch = false;
+            if (item.config.syncMode === 'update' && targetType !== 'directory') {
+              remoteStat = await connection.stat(item.remotePath);
+              const localStat = await fs.promises.stat(item.localPath);
+              targetsMatch = remoteStat?.size === localStat.size;
+              action = remoteStat?.modifyTime && remoteStat.modifyTime > localStat.mtime ? 'overwrite' : 'skip';
+            } else {
+              action = item.config.collisionPolicy && item.config.collisionPolicy !== 'ask'
+                ? item.config.collisionPolicy === 'overwrite' ? 'overwrite' : 'skip'
+                : await this.handleCollision(item.localPath, 'local', targetType === 'directory');
+            }
             if (action === 'skip') {
-              throw new Error('Skipped: Local target exists');
+              throw new Error(item.config.syncMode === 'update'
+                ? targetsMatch ? 'Skipped: Local target already matches' : 'Skipped: Local target is newer'
+                : 'Skipped: Local target exists');
             }
             if (targetType === 'directory') {
               await fs.promises.rm(item.localPath, { recursive: true, force: true });
@@ -326,6 +370,9 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           connectionManager.releasePooledConnection(item.config, pooledConnection);
         }
         item.endTime = new Date();
+        if (item.status === 'completed') {
+          this.recordCompletedTransfer(item);
+        }
         activeTransfers--;
         if ((item.status === 'completed' || item.status === 'error') && this._activeCount > 0) {
           this._activeCount--;
@@ -372,6 +419,67 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       this.isProcessing = false;
       this.active = false;
       this.emit('queueComplete');
+    }
+  }
+
+  public getAnalytics(days = 14): TransferAnalytics {
+    const now = new Date();
+    const dayEntries = Array.from({ length: days }, (_, offset) => {
+      const day = new Date(now);
+      day.setHours(0, 0, 0, 0);
+      day.setDate(day.getDate() - (days - 1 - offset));
+      return {
+        date: day.toISOString().slice(0, 10),
+        uploadedBytes: 0,
+        downloadedBytes: 0,
+        uploadedFiles: 0,
+        downloadedFiles: 0
+      };
+    });
+    const byDate = new Map(dayEntries.map(entry => [entry.date, entry]));
+    let uploadedFiles = 0;
+    let downloadedFiles = 0;
+    let uploadedBytes = 0;
+    let downloadedBytes = 0;
+    let totalDurationMs = 0;
+
+    for (const item of this.transferHistory) {
+      if (!item.endTime) continue;
+      const date = item.endTime.toISOString().slice(0, 10);
+      const entry = byDate.get(date);
+      if (!entry) continue;
+      const size = Math.max(0, item.size || item.transferred || 0);
+      const duration = item.startTime ? Math.max(0, item.endTime.getTime() - item.startTime.getTime()) : 0;
+      totalDurationMs += duration;
+
+      if (item.direction === 'upload') {
+        uploadedFiles++;
+        uploadedBytes += size;
+        entry.uploadedFiles++;
+        entry.uploadedBytes += size;
+      } else {
+        downloadedFiles++;
+        downloadedBytes += size;
+        entry.downloadedFiles++;
+        entry.downloadedBytes += size;
+      }
+    }
+
+    const completed = uploadedFiles + downloadedFiles;
+    return {
+      uploadedFiles,
+      downloadedFiles,
+      uploadedBytes,
+      downloadedBytes,
+      averageDurationMs: completed ? Math.round(totalDurationMs / completed) : 0,
+      days: dayEntries
+    };
+  }
+
+  private recordCompletedTransfer(item: TransferItem): void {
+    this.transferHistory.push({ ...item });
+    if (this.transferHistory.length > 500) {
+      this.transferHistory.splice(0, this.transferHistory.length - 500);
     }
   }
 
@@ -491,6 +599,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     });
 
     await Promise.all(filePromises);
+    logger.info(`Download directory complete: ${result.downloaded.length} downloaded, ${result.failed.length} failed, ${result.skipped.length} skipped`);
     return result;
   }
 

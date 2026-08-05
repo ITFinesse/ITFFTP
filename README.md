@@ -95,7 +95,7 @@ The dashboard owns auto-connect, auto-reconnect, refresh behavior, hidden files,
 
 ### From a marketplace
 
-Search for **ITFFTP**. The extension identity is `ITFinesse.stackerftp`; the historical `stackerftp` command/configuration prefix is intentionally retained for workspace compatibility.
+Search for **ITFFTP**. The extension identity is `ITFinesse.itfftp`; the historical `stackerftp` command/configuration prefix is retained for workspace compatibility.
 
 ## Reliability and security fixes in this fork
 

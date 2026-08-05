@@ -30,12 +30,16 @@ coverage/**
 DEVELOPMENT.md
 FEATURE_PLAN.md
 FEATURES.md
+AGENTS.md
+LEAN-CTX.md
+.lean-ctx/
 .claude/
 brain/
 
 # Recursive VSIX & Logs
 **/*.vsix
 **/*.log
+exec-*.png
 
 # Other
 webpack.config.js
@@ -46,3 +50,4 @@ resources/icon-source/**
 publish.sh
 build.sh
 .snapshotfinesse/
+.playwright-cli/**

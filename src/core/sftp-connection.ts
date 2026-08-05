@@ -32,7 +32,8 @@ export class SFTPConnection extends BaseConnection {
         port: this.config.port || 22,
         username: this.config.username,
         readyTimeout: this.config.connTimeout || 20000,
-        keepaliveInterval: this.config.keepalive || 10000
+        // Zero is intentional: it disables ssh2 keepalives for this host.
+        keepaliveInterval: this.config.keepalive ?? 300000
       };
 
       if (this.config.privateKeyPath) {
@@ -311,6 +312,17 @@ export class SFTPConnection extends BaseConnection {
             }
           });
         });
+      });
+    });
+  }
+
+  async setModifyTime(remotePath: string, modifyTime: Date): Promise<boolean> {
+    if (!this.sftp) return false;
+    const seconds = Math.floor(modifyTime.getTime() / 1000);
+    return new Promise(resolve => {
+      this.sftp!.utimes(remotePath, seconds, seconds, error => {
+        if (error) logger.debug(`SFTP server did not preserve timestamp for ${remotePath}`, error);
+        resolve(!error);
       });
     });
   }

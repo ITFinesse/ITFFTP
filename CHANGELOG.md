@@ -2,6 +2,27 @@
 
 All notable changes to ITFFTP will be documented in this file. Historical releases retain their original StackerFTP names for provenance.
 
+## [2.1.0] - 2026-08-05
+
+### Changed
+
+- Precompute paired local/remote comparisons after connection and persist size, timestamp, type, and status metadata in VS Code global storage.
+- Render Diff Viewer immediately from its cached snapshot while a deduplicated background scan validates remote state.
+- Update cached local comparison records incrementally from workspace file events instead of repeating a full recursive scan.
+
+### Fixed
+
+- Treat Diff Viewer folder actions as recursive operations even though normalized tree paths do not end in a slash.
+- Preserve source-newer overwrite behavior for recursive downloads and report partial folder-transfer failures.
+
+## [2.0.1] - 2026-08-04
+
+### Changed
+
+- Reworked the dashboard into a compact, wide VS Code webview with an internal Hosts, Settings, Ignores, Diff Viewer, and Analytics rail.
+- Removed the legacy Connections, Remote Explorer, and Transfer Queue activity-bar views; selecting ITFFTP now opens the dashboard directly.
+- Simplified Ignores to workspace files ↔ ignored patterns with manual wildcard entry and rebuilt Diff Viewer around local/remote transfer panes.
+
 ## [2.0.0] - 2026-08-03
 
 This major release is the ITFinesse fork update maintained by Stephen Stern. It preserves the SFTP and StackerFTP feature set while adding the ITFFTP dashboard, reliability, packaging, and branding work below.
@@ -99,28 +120,29 @@ This major release is the ITFinesse fork update maintained by Stephen Stern. It 
 ## [1.2.0] - 2026-02-16
 
 ### Added
-- **Compare Folders Panel**: New split-view WebView panel for comparing local and remote folders. Opens in a new tab with tree structure, color-coded differences, and actions.
-- **Quick Search**: Ultra-fast file search in a new panel. Parallel directory traversal with 150ms debounce, wildcard pattern support (`*`, `?`), and instant results.
-- **Folder Selection**: Compare Folders now allows selecting specific folders or entire workspace.
-- **Search Path Change**: Quick Search allows changing the search location (entire remote or custom path).
+- **Compare Folders Panel**: Added a new split local-vs-remote comparison view with local left and remote right trees and color-coded file states.
+- **Web Dashboard Parity Workflows**: Added dashboard-driven flow for host switching, settings, ignores, diff tree browsing, and analytics-style workflow visibility.
+- **Quick Search and Filtering**: Added fast search across local and remote contexts with debounce and wildcard support.
+- **Compare Filters**: Added filtering for all/ local-only / remote-only / changed-only views to focus diff review.
+- **Bulk Actions**: Added per-row actions for show-diff, upload, download, reveal, and multi-select workflow support in the comparison UX.
+- **Export Support**: Added comparison export output in machine-friendly formats (JSON / CSV).
+- **Ignore Management**: Added workspace ignore list management with wildcard entries and tree-aware hide/show behavior.
+- **Diff-Only Workflow**: Added context action paths to support manual transfer from the diff result set without returning to external views.
 
-### Features
-- **Compare Panel**: Split view showing local (left) and remote (right) with tree structure
-- **Filters**: All / Only Local / Only Remote / Different filtering
-- **Actions**: Show Diff, Upload, Download, Reveal buttons for each file
-- **Export**: Save comparison results as JSON or CSV
-- **Search**: Real-time file search with debounce in Compare Panel
-- **Quick Search**: Open file, Download, Reveal actions directly from results
-
-### Performance Improvements
-- **Parallel Remote Traversal**: Sibling folders now scanned concurrently using Promise.all
-- **mtime Comparison**: More accurate comparison using both size AND modification time
-- **Progress Streaming**: Real-time progress updates during folder comparison
-- **Ignore Patterns**: Configurable patterns to exclude files/folders (.git, node_modules, etc.)
+### Changed
+- **Transfer UX**: Updated comparison panel to support recursive folder actions and keep local/remote panes visually synchronized.
+- **Comparison Accuracy**: Improved diff classification logic to combine file size and timestamps for status signaling.
+- **Progress & Feedback**: Added refresh and scan progress indicators during long-running folder comparisons.
+- **Panel Layout**: Refined split-view presentation to reduce navigation friction and keep navigation between local and remote panes clearer.
+- **Context Menu Coverage**: Expanded file and folder menu actions to include upload/download paths from the compare tree.
+- **Ignore Behavior**: Added clearer ignored-item handling between workspace and comparison tree views.
 
 ### Fixed
-- **Search Input Focus**: Fixed search input losing focus on each keystroke in Compare Panel
-- **Context Menu Integration**: Quick Search available in Explorer and Remote Explorer context menus
+- **Search Stability**: Resolved focus-loss during rapid search typing in compare views.
+- **Context Action Scope**: Fixed remote/local action routing for folder-level operations and tree items.
+- **Comparison Correctness**: Removed known edge cases where local vs remote state rendered inconsistently.
+- **Data Completeness**: Fixed occasional missing entries and stale states during comparison and export flows.
+- **Duplicate UI Actions**: Reduced duplicate action rendering from quick actions and context menus.
 
 ## [1.1.10] - 2026-02-16
 

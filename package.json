@@ -1,7 +1,7 @@
 {
-  "name": "stackerftp",
+  "name": "itfftp",
   "displayName": "ITFFTP",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "publisher": "ITFinesse",
   "author": "Stephen Stern",
   "repository": {
@@ -46,8 +46,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:stackerftp.openSettings",
-    "onCommand:stackerftp.connect",
-    "onView:stackerftp.connectionForm"
+    "onCommand:stackerftp.connect"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -79,8 +78,15 @@
           "type": "number",
           "default": 4,
           "minimum": 1,
-          "maximum": 10,
-          "description": "Number of concurrent file transfers (max connections = this + 1 primary)"
+          "maximum": 100,
+          "description": "Number of concurrent file transfers (1-100; max connections = this + 1 primary)"
+        },
+        "stackerftp.dashboardZoom": {
+          "type": "number",
+          "default": 110,
+          "minimum": 80,
+          "maximum": 160,
+          "description": "ITFFTP dashboard zoom percentage"
         },
         "stackerftp.showWebMasterTools": {
           "type": "boolean",
@@ -655,16 +661,8 @@
       ],
       "explorer/context": [
         {
-          "command": "stackerftp.upload",
-          "group": "z_itfinesse@1"
-        },
-        {
-          "command": "stackerftp.download",
-          "group": "z_itfinesse@2"
-        },
-        {
           "submenu": "stackerftp.submenu",
-          "group": "z_itfinesse@9"
+          "group": "z_itfinesse@1"
         }
       ],
       "scm/resourceState/context": [
@@ -681,8 +679,16 @@
       ],
       "stackerftp.submenu": [
         {
+          "command": "stackerftp.upload",
+          "group": "1_transfer@1"
+        },
+        {
+          "command": "stackerftp.download",
+          "group": "1_transfer@2"
+        },
+        {
           "command": "stackerftp.uploadToAllProfiles",
-          "group": "1_transfer@1",
+          "group": "1_transfer@3",
           "when": "explorerResourceIsFile"
         },
         {
@@ -764,21 +770,6 @@
       ],
       "view/title": [
         {
-          "command": "stackerftp.newConnection",
-          "when": "view == stackerftp.connectionForm",
-          "group": "navigation@1"
-        },
-        {
-          "command": "stackerftp.tree.refresh",
-          "when": "view == stackerftp.connectionForm",
-          "group": "navigation@2"
-        },
-        {
-          "command": "stackerftp.openSettings",
-          "when": "view == stackerftp.connectionForm",
-          "group": "navigation@3"
-        },
-        {
           "command": "stackerftp.refresh",
           "when": "view == stackerftp.remoteExplorerTree",
           "group": "navigation@1"
@@ -850,31 +841,6 @@
         }
       ],
       "view/item/context": [
-        {
-          "command": "stackerftp.newFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "inline@1"
-        },
-        {
-          "command": "stackerftp.newFolder",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "inline@2"
-        },
-        {
-          "command": "stackerftp.tree.refresh",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "inline@3"
-        },
-        {
-          "command": "stackerftp.newFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /(-connected|directory)$/",
-          "group": "inline@1"
-        },
-        {
-          "command": "stackerftp.newFolder",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /directory$/",
-          "group": "inline@2"
-        },
         {
           "command": "stackerftp.tree.openFile",
           "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
@@ -957,22 +923,12 @@
         },
         {
           "command": "stackerftp.newFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
+          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /(-connected|directory)$/",
           "group": "1_files@1"
         },
         {
           "command": "stackerftp.newFolder",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "1_files@2"
-        },
-        {
-          "command": "stackerftp.newFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /directory$/",
-          "group": "1_files@1"
-        },
-        {
-          "command": "stackerftp.newFolder",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /directory$/",
+          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /(-connected|directory)$/",
           "group": "1_files@2"
         },
         {
@@ -983,17 +939,7 @@
         {
           "command": "stackerftp.connect",
           "when": "view == stackerftp.remoteExplorerTree && viewItem == disconnected",
-          "group": "inline"
-        },
-        {
-          "command": "stackerftp.connect",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem == disconnected",
           "group": "1_connection"
-        },
-        {
-          "command": "stackerftp.disconnect",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "inline"
         },
         {
           "command": "stackerftp.disconnect",
@@ -1003,11 +949,6 @@
         {
           "command": "stackerftp.cancelTransferItem",
           "when": "view == stackerftp.transferQueue && viewItem =~ /transfer-(pending|transferring)/",
-          "group": "inline"
-        },
-        {
-          "command": "stackerftp.retryTransferItem",
-          "when": "view == stackerftp.transferQueue && viewItem =~ /^transfer-error$/",
           "group": "inline"
         },
         {
@@ -1031,17 +972,7 @@
         },
         {
           "command": "stackerftp.uploadChangedFiles",
-          "group": "stackerftp",
-          "when": "scmProvider == git && scmResourceGroup == workingTree"
-        },
-        {
-          "command": "stackerftp.uploadChangedFiles",
           "group": "inline",
-          "when": "scmProvider == git && scmResourceGroup == index"
-        },
-        {
-          "command": "stackerftp.uploadChangedFiles",
-          "group": "stackerftp",
           "when": "scmProvider == git && scmResourceGroup == index"
         }
       ],
@@ -1057,28 +988,27 @@
       "stackerftp-explorer": [
         {
           "type": "webview",
-          "id": "stackerftp.connectionForm",
-          "name": "Connections",
+          "id": "stackerftp.dashboardLauncher",
+          "name": "Open Dashboard",
           "when": "workspaceFolderCount > 0",
           "contextualTitle": "ITFFTP",
           "visibility": "visible",
-          "icon": "$(plug)"
+          "icon": "$(dashboard)"
+        },
+        {
+          "id": "stackerftp.connectionForm",
+          "name": "Connections",
+          "when": "false"
         },
         {
           "id": "stackerftp.remoteExplorerTree",
           "name": "Remote Explorer",
-          "when": "workspaceFolderCount > 0 && !stackerftp.formVisible",
-          "contextualTitle": "ITFFTP",
-          "visibility": "visible",
-          "icon": "$(folder-opened)"
+          "when": "false"
         },
         {
           "id": "stackerftp.transferQueue",
           "name": "Transfer Queue",
-          "when": "workspaceFolderCount > 0 && !stackerftp.formVisible",
-          "contextualTitle": "ITFFTP",
-          "visibility": "collapsed",
-          "icon": "$(cloud-upload)"
+          "when": "false"
         }
       ]
     },
@@ -1142,19 +1072,22 @@
     "@types/node": "^20.0.0",
     "@types/ssh2": "^1.11.0",
     "@types/vscode": "^1.74.0",
-    "@vscode/codicons": "^0.0.35",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/codicons": "^0.0.35",
+    "basic-ftp": "^5.2.1",
     "esbuild": "^0.27.3",
     "eslint": "^8.0.0",
-    "ovsx": "0.10.9",
-    "typescript": "^5.0.0",
-    "vitest": "^1.6.0",
-    "vsce": "^2.15.0",
-    "basic-ftp": "^5.2.1",
     "ignore": "^5.3.0",
     "mime-types": "^2.1.35",
     "minimatch": "^9.0.0",
-    "ssh2": "^1.15.0"
+    "ovsx": "0.10.9",
+    "ssh2": "^1.15.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.6.0",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1"
   }
 }

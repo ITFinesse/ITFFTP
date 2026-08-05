@@ -109,6 +109,11 @@ export abstract class BaseConnection extends EventEmitter {
   abstract list(remotePath: string): Promise<FileEntry[]>;
   abstract download(remotePath: string, localPath: string): Promise<void>;
   abstract upload(localPath: string, remotePath: string): Promise<void>;
+  /** Preserve a source modification time after transfer when the protocol and
+   * server support it. Returns false when timestamp updates are unavailable. */
+  async setModifyTime(_remotePath: string, _modifyTime: Date): Promise<boolean> {
+    return false;
+  }
   abstract delete(remotePath: string): Promise<void>;
   abstract mkdir(remotePath: string): Promise<void>;
   abstract rmdir(remotePath: string, recursive?: boolean): Promise<void>;

@@ -1,102 +1,40 @@
-<main class="settings-container">
-  <header class="settings-header">
-    <div>
-      <h1>ITFFTP Settings</h1>
-      <p>Workspace settings for connection behavior and the Remote Explorer.</p>
-    </div>
-    <button class="icon-button" id="btnOpenJson" title="Open settings.json">
-      <span class="codicon codicon-go-to-file"></span>
-    </button>
-  </header>
+<style id="itfftp-neutral-theme">.button.primary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);border-color:var(--vscode-input-border,transparent)}.button.primary:hover{background:var(--vscode-button-secondaryHoverBackground)}.rail-button.is-active,.host-row.is-selected,.path-row:hover,.path-row.is-selected,.file-row:hover,.file-row.is-selected{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);box-shadow:inset 2px 0 var(--vscode-descriptionForeground)}.rail-button.is-active{color:var(--vscode-foreground)}</style>
+<style id="itfftp-diff-layout">.diff-file-view{margin-top:12px;padding:0!important;overflow:hidden;border:1px solid var(--vscode-panel-border);border-radius:5px;background:var(--vscode-editor-background)!important}.diff-file-view:empty{display:none}.diff-file-heading{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}.diff-file-heading h3{margin:0;font-size:12px}.diff-editor-header,.diff-editor-body{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important}.diff-editor-header{border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}.diff-editor-header strong{padding:6px 10px}.diff-editor-header strong+strong,.diff-code-pane+.diff-code-pane{border-left:1px solid var(--vscode-panel-border)}.diff-editor-body{height:390px}.diff-code-pane{min-width:0;overflow:auto;font-family:var(--vscode-editor-font-family,monospace);font-size:var(--vscode-editor-font-size,13px);line-height:20px}.diff-code-cell{display:grid;grid-template-columns:46px minmax(max-content,1fr);min-height:20px;white-space:pre}.diff-line-number{padding-right:9px;background:var(--vscode-editorGutter-background);color:var(--vscode-editorLineNumber-foreground);text-align:right}.diff-code-cell code{padding:0 8px;font:inherit}.diff-removed{background:var(--vscode-diffEditor-removedTextBackground,rgba(255,0,0,.2))}.diff-added{background:var(--vscode-diffEditor-insertedTextBackground,rgba(0,255,0,.2))}.file-list{background:#0b1117!important;border-color:#526a7e!important}.file-row{display:grid!important;grid-template-columns:18px minmax(0,1fr) auto!important;color:#eaf3fa!important;border-bottom:1px solid #263746!important}.file-row:nth-child(even){background:#101922}.file-row:hover{background:#243b4e!important}.file-row.is-selected{background:#175078!important;outline:1px solid #68bdf5;outline-offset:-1px}.file-row.is-folder .tree-name{color:#8fd0ff;font-weight:650}.diff-context-menu{min-width:210px;padding:5px;background:var(--vscode-menu-background,#20252b);border:1px solid var(--vscode-menu-border,#657687);border-radius:5px;box-shadow:0 10px 28px rgba(0,0,0,.55)}.diff-context-menu button{display:flex;width:100%;align-items:center;gap:9px;padding:7px 9px;border:0;border-radius:3px;background:transparent;color:var(--vscode-menu-foreground,#f2f2f2);text-align:left}.diff-context-menu button:hover{background:var(--vscode-menu-selectionBackground,#0e639c);color:var(--vscode-menu-selectionForeground,#fff)}</style>
+<style>:root{--vscode-textLink-foreground:var(--vscode-foreground);--vscode-charts-blue:var(--vscode-descriptionForeground);--vscode-button-background:var(--vscode-button-secondaryBackground);--vscode-button-hoverBackground:var(--vscode-button-secondaryHoverBackground)}</style>
+<main class="dashboard-shell">
+  <aside class="dashboard-rail" aria-label="ITFFTP dashboard sections">
+    <div class="brand"><span class="codicon codicon-server"></span><strong>ITFFTP</strong></div>
+    <nav class="rail-nav">
+      <button class="rail-button is-active" type="button" data-panel="hosts"><span class="codicon codicon-server"></span><span>Hosts</span></button>
+      <button class="rail-button" type="button" data-panel="settings"><span class="codicon codicon-settings-gear"></span><span>Settings</span></button>
+      <button class="rail-button" type="button" data-panel="ignores"><span class="codicon codicon-list-filter"></span><span>Ignores</span></button>
+      <button class="rail-button" type="button" data-panel="diff"><span class="codicon codicon-diff"></span><span>Diff Viewer</span></button>
+      <button class="rail-button" type="button" data-panel="analytics"><span class="codicon codicon-graph"></span><span>Analytics</span></button>
+    </nav>
+    <div class="rail-footer"><span class="status-dot"></span> Workspace</div>
+  </aside>
 
-  <div class="message hidden" id="settingsMessage" role="status"></div>
+  <section class="dashboard-content">
+    <header class="dashboard-header">
+      <div><div class="eyebrow">ITFFTP / Workspace</div><h1 id="pageTitle">Hosts</h1><p id="pageDescription">Manage remote locations and choose the workspace default.</p></div>
+      <div class="header-actions"><span class="connection-state"><span class="status-dot"></span> Ready</span><button class="button secondary" id="btnOpenJson"><span class="codicon codicon-go-to-file"></span> sftp.json</button></div>
+    </header>
+    <div class="message hidden" id="settingsMessage" role="status" aria-live="polite"></div>
+    <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
 
-  <section class="settings-section">
-    <h2>Connection profiles</h2>
-    <p class="section-description">All server profiles from <code>.vscode/sftp.json</code>. Use one object or an array of objects. Changes are validated before saving.</p>
-    <textarea id="connections" spellcheck="false" aria-label="Connection profiles JSON"></textarea>
-    <p class="sensitive-note"><span class="codicon codicon-shield"></span> Passwords and key passphrases entered here are stored in the workspace configuration file.</p>
+    <section class="panel" data-panel-content="hosts">
+      <div class="panel-heading"><div><h2>Remote Locations</h2><p>Store every FTP, FTPS, and SFTP target for this workspace.</p></div><div class="panel-tools"><span class="count" id="hostCount">0 hosts</span><button class="button secondary" id="btnImportConnections">Import</button><button class="button secondary" id="btnExportSelected">Export selected</button><button class="button secondary" id="btnExportConnections">Export all</button><button class="button primary" id="btnAddHost"><span class="codicon codicon-add"></span> Add</button></div></div>
+      <div class="host-layout"><div class="host-list" id="hostList" aria-live="polite"></div><form class="host-editor" id="hostEditor"><div class="editor-heading"><h3 id="editorTitle">Select a host</h3><div class="host-test-actions" style="display:flex;gap:5px"><button class="button secondary hidden" type="button" id="btnTestHost">Test connection</button><button class="button danger hidden" type="button" id="btnDeleteHost">Remove</button></div></div><p id="editorNote" class="muted">Choose a remote location or add a new one.</p><div class="form-grid"><label>Name<input id="hostName" autocomplete="off"></label><label>Protocol<select id="hostProtocol"><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">FTPS</option></select></label><label class="full">Host<input id="hostAddress" placeholder="example.com" autocomplete="off"></label><label>Username<input id="hostUsername" autocomplete="username"></label><label>Port<input id="hostPort" type="number" min="1" max="65535"></label><label class="full">Password<input id="hostPassword" type="password" autocomplete="new-password" placeholder="Stored in workspace settings"></label><label class="full">Remote path<input id="hostRemotePath" placeholder="/"></label><label>Existing file action<select id="hostCollisionPolicy"><option value="ask">Warn before overwrite</option><option value="overwrite">Always overwrite</option><option value="skip">Skip existing files</option></select></label><label>Sync comparison<select id="hostSyncMode"><option value="update">Only if source is newer</option><option value="full">Always compare all files</option></select></label><label class="full">Automatic transfer<select id="hostAutoSync"><option value="off">Off</option><option value="upload">Upload local saves</option><option value="download">Download when opened</option><option value="both">Upload and download</option></select></label></div><label class="default-row"><input id="hostDefault" type="checkbox"><span><strong>Use as default host</strong><small>New transfers use this location unless another is selected.</small></span></label></form></div>
+    </section>
+
+    <section class="panel hidden" data-panel-content="settings"><div class="panel-heading"><div><h2>Settings</h2><p>Compact workspace-wide transfer and explorer preferences.</p></div></div><div class="settings-grid"><section class="settings-section"><h3>Connection</h3><label class="setting-row"><span>Auto-connect on startup<small>Connect to the default host when VS Code starts.</small></span><input type="checkbox" id="autoConnect"></label><label class="setting-row"><span>Auto-reconnect<small>Retry an interrupted connection.</small></span><input type="checkbox" id="autoReconnect"></label><label class="setting-row"><span>File watcher<small>Run configured upload/delete actions on local changes.</small></span><input type="checkbox" id="enableFileWatcher"></label></section><section class="settings-section"><h3>Remote Explorer</h3><label class="setting-row"><span>Refresh after operations<small>Refresh listings after transfers.</small></span><input type="checkbox" id="autoRefresh"></label><label class="setting-row"><span>Show hidden files<small>Include dotfiles in remote listings.</small></span><input type="checkbox" id="showHiddenFiles"></label><label class="setting-row setting-row-select"><span>Sort entries by</span><select id="remoteExplorerSortOrder"><option value="name">Name</option><option value="size">Size</option><option value="date">Modified date</option><option value="type">Type</option></select></label></section><section class="settings-section"><h3>Safety</h3><label class="setting-row"><span>Confirm before deleting</span><input type="checkbox" id="confirmDelete"></label><label class="setting-row"><span>Confirm before syncing</span><input type="checkbox" id="confirmSync"></label><label class="setting-row"><span>Syntax highlighting</span><input type="checkbox" id="defaultSyntaxHighlighting"></label><label class="setting-row"><span>Download remote files when opened</span><input type="checkbox" id="downloadWhenOpenInRemoteExplorer"></label></section><section class="settings-section"><h3>Performance</h3><label class="setting-row setting-row-select"><span>Concurrent transfers<small>Maximum parallel transfers.</small></span><input type="number" id="transferConcurrency" min="1" max="100"></label><label class="setting-row setting-row-select"><span>Dashboard zoom<small>Scale dashboard text and controls (80–160%).</small></span><input type="number" id="dashboardZoom" min="80" max="160" step="5"></label><label class="setting-row"><span>Use native TreeView<small>Requires a reload when changed.</small></span><input type="checkbox" id="useNativeTreeView"></label><label class="setting-row"><span>WebMaster tools</span><input type="checkbox" id="showWebMasterTools"></label></section></div></section>
+
+    <section class="panel hidden" data-panel-content="ignores"><div class="panel-heading"><div><h2>Ignores</h2><p>Move workspace files between transfer scope and ignored patterns.</p></div><label class="compact-select">Host<select id="ignoreHost"></select></label></div><div class="ignore-grid"><section><h3>Workspace files</h3><div class="path-list" id="workspaceFileList" role="listbox" aria-label="Workspace files"></div></section><div class="transfer-arrows"><button class="icon-button" id="btnIgnorePath" type="button" title="Add selected path to ignores" aria-label="Add selected path to ignores"><span class="codicon codicon-arrow-right"></span></button><button class="icon-button" id="btnRestorePath" type="button" title="Remove selected pattern from ignores" aria-label="Remove selected pattern from ignores"><span class="codicon codicon-arrow-left"></span></button></div><section><h3>Ignored</h3><div class="path-list" id="ignoredPatternList" role="listbox" aria-label="Ignored patterns"></div></section></div><div class="manual-ignore"><input id="manualIgnore" placeholder="Add wildcard, for example *.log or .env.*"><button class="button secondary" id="btnAddManualIgnore" type="button">Add ignore</button><span class="muted">Patterns are saved per host.</span></div></section>
+
+    <section class="panel hidden" data-panel-content="diff"><div class="panel-heading"><div><h2>Diff Viewer</h2><p>One paired comparison tree: each differing path is represented on both sides.</p></div><div class="panel-toggles"><label class="toggle-row"><span>Follow folders</span><input type="checkbox" id="diffFollow" checked></label><label class="toggle-row"><span>Changed files only</span><input type="checkbox" id="diffChangedOnly" checked></label><label class="toggle-row"><span>Hide ignored</span><input type="checkbox" id="diffHideIgnored" checked></label></div></div><div class="diff-toolbar"><label>Local root<input id="diffLocalRoot" placeholder="Workspace folder" disabled></label><label>Remote root<input id="diffRemoteRoot" placeholder="/remote/path" disabled></label><button class="button secondary" id="btnRefreshDiff" type="button">Refresh</button><button class="button primary" id="btnSyncChangedUp" type="button">Sync changed up</button><button class="button secondary" id="btnSyncChangedDown" type="button">Sync changed down</button></div><div class="diff-transfer-progress" id="diffTransferProgress" role="status" aria-live="polite"><span id="diffTransferLabel">Ready for file operations</span><strong id="diffTransferPercent">100%</strong><i aria-hidden="true"></i></div><div class="diff-grid"><section class="file-pane"><div class="file-pane-heading"><strong>Local</strong><span id="diffLocalCount">0 paths</span></div><div class="file-list" id="diffLocalList" role="tree" aria-label="Local files"></div></section><div class="diff-actions"><button class="button primary" id="btnUploadDiff" type="button" title="Upload selected local file"><span class="codicon codicon-arrow-right"></span> Upload</button><button class="button secondary" id="btnDownloadDiff" type="button" title="Download selected remote file"><span class="codicon codicon-arrow-left"></span> Download</button></div><section class="file-pane"><div class="file-pane-heading"><strong>Remote</strong><span id="diffRemoteCount">0 paths</span></div><div class="file-list" id="diffRemoteList" role="tree" aria-label="Remote files"><div class="empty-state">Connect to a host to compare files.</div></div></section></div><div class="diff-legend"><span class="added">Missing locally</span><span class="modified">Modified</span><span class="missing">Missing remotely</span><span class="muted">Right-click a path for transfer, delete, rename, and ignore actions.</span></div><section class="diff-file-view" id="diffFileView" aria-live="polite"></section></section>
+
+    <section class="panel hidden" data-panel-content="analytics"><div class="panel-heading"><div><h2>Analytics</h2><p>Transfer activity stored persistently in your VS Code user data.</p></div><label class="compact-select">Project<select id="analyticsProjectFilter"><option value="all">All projects</option></select></label></div><div class="analytics-metrics"><div><span>Uploads</span><strong id="analyticsUploads">0</strong><small id="analyticsUploadSize">0 B</small></div><div><span>Downloads</span><strong id="analyticsDownloads">0</strong><small id="analyticsDownloadSize">0 B</small></div><div><span>Average time</span><strong id="analyticsDuration">—</strong><small>Completed transfers</small></div></div><div class="analytics-charts"><div class="analytics-chart"><div class="chart-heading"><h3>Transfer volume</h3><span>Last 14 days</span></div><div class="chart-canvas-wrap"><canvas id="analyticsChart" aria-label="Upload and download transfer volume"></canvas></div></div><div class="analytics-chart"><div class="chart-heading"><h3>Transfer count</h3><span>Completed files</span></div><div class="chart-canvas-wrap"><canvas id="analyticsFilesChart" aria-label="Uploaded and downloaded file count"></canvas></div></div><div class="analytics-chart"><div class="chart-heading"><h3>Direction split</h3><span>All completed transfers</span></div><div class="analytics-donut-wrap"><canvas id="analyticsDirectionChart" aria-label="Upload and download split"></canvas></div></div><div class="analytics-chart"><div class="chart-heading"><h3>Cumulative activity</h3><span>Files over time</span></div><div class="chart-canvas-wrap"><canvas id="analyticsCumulativeChart" aria-label="Cumulative transferred files"></canvas></div></div></div></section>
+
+    <footer class="settings-actions"><span class="muted" id="autoSaveStatus">Changes save automatically.</span></footer>
   </section>
-
-  <section class="settings-section">
-    <h2>Connection</h2>
-    <label class="setting-row">
-      <span><strong>Auto-connect on startup</strong><small>Connect to the active configured server shortly after VS Code starts. Stored credentials or a private key are required.</small></span>
-      <input type="checkbox" id="autoConnect">
-    </label>
-    <label class="setting-row">
-      <span><strong>Auto-reconnect after disconnect</strong><small>Retry a connection when the server drops it unexpectedly.</small></span>
-      <input type="checkbox" id="autoReconnect">
-    </label>
-  </section>
-
-  <section class="settings-section">
-    <h2>Remote Explorer</h2>
-    <label class="setting-row">
-      <span><strong>Refresh after operations</strong><small>Refresh the Remote Explorer after uploads, downloads, and file changes.</small></span>
-      <input type="checkbox" id="autoRefresh">
-    </label>
-    <label class="setting-row">
-      <span><strong>Show hidden files</strong><small>Include dotfiles and other hidden entries in remote listings.</small></span>
-      <input type="checkbox" id="showHiddenFiles">
-    </label>
-    <label class="setting-row">
-      <span><strong>Show WebMaster tools</strong><small>Show checksum, permissions, backup, and cache tools.</small></span>
-      <input type="checkbox" id="showWebMasterTools">
-    </label>
-    <label class="setting-row setting-row-select">
-      <span><strong>Sort remote entries by</strong><small>Default ordering for files and folders.</small></span>
-      <select id="remoteExplorerSortOrder">
-        <option value="name">Name</option>
-        <option value="size">Size</option>
-        <option value="date">Modified date</option>
-        <option value="type">Type</option>
-      </select>
-    </label>
-    <label class="setting-row setting-row-select">
-      <span><strong>Transfer concurrency</strong><small>Maximum parallel transfers for bulk operations (1–10).</small></span>
-      <input type="number" id="transferConcurrency" min="1" max="10" step="1">
-    </label>
-    <label class="setting-row">
-      <span><strong>Use native TreeView</strong><small>Use the native Remote Explorer with file icons. Requires reload when changed.</small></span>
-      <input type="checkbox" id="useNativeTreeView">
-    </label>
-    <label class="setting-row">
-      <span><strong>Download when opening remote files</strong><small>Download a remote file instead of opening its read-only content view.</small></span>
-      <input type="checkbox" id="downloadWhenOpenInRemoteExplorer">
-    </label>
-  </section>
-
-  <section class="settings-section">
-    <h2>Safety and local behavior</h2>
-    <label class="setting-row">
-      <span><strong>Confirm before deleting</strong><small>Ask for confirmation before deleting remote files or folders.</small></span>
-      <input type="checkbox" id="confirmDelete">
-    </label>
-    <label class="setting-row">
-      <span><strong>Confirm before syncing</strong><small>Ask for confirmation before synchronizing directories.</small></span>
-      <input type="checkbox" id="confirmSync">
-    </label>
-    <label class="setting-row">
-      <span><strong>Enable file watcher</strong><small>Watch local files for configured automatic upload and delete actions.</small></span>
-      <input type="checkbox" id="enableFileWatcher">
-    </label>
-    <label class="setting-row">
-      <span><strong>Default syntax highlighting</strong><small>Enable syntax highlighting when viewing remote text files.</small></span>
-      <input type="checkbox" id="defaultSyntaxHighlighting">
-    </label>
-  </section>
-
-  <section class="settings-section">
-    <h2>Named remotes</h2>
-    <p class="section-description">Optional reusable remote definitions referenced by <code>"remote"</code> in a connection profile.</p>
-    <textarea id="remotes" spellcheck="false" aria-label="Named remotes JSON"></textarea>
-  </section>
-
-  <footer class="settings-actions">
-    <button class="button secondary" id="btnReset">Reset workspace overrides</button>
-    <span class="action-spacer"></span>
-    <button class="button secondary" id="btnReload">Reload</button>
-    <button class="button primary" id="btnSave">Save settings</button>
-  </footer>
 </main>
