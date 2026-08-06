@@ -22,6 +22,7 @@ import { TransferQueueTreeProvider } from './providers/transfer-queue-tree';
 import { SettingsPanel } from './providers/settings-panel';
 import { DashboardLauncherProvider } from './providers/dashboard-launcher';
 import { AnalyticsStore } from './core/analytics-store';
+import { FTPConfig } from './types';
 
 let remoteExplorerProvider: RemoteExplorerWebviewProvider;
 let remoteTreeProvider: RemoteExplorerTreeProvider;
@@ -97,6 +98,7 @@ export function activate(context: vscode.ExtensionContext): void {
     await configManager.loadConfig(scope.fsPath);
     connectionFormProvider?.refresh();
     remoteTreeProvider?.refresh();
+    await startFileWatcher(scope.fsPath);
     scheduleAutoConnect(scope.fsPath);
   }, analyticsStore, context.globalStorageUri);
   settingsPanelProvider = settingsPanel;
@@ -459,9 +461,18 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
 
 async function startFileWatcher(workspaceRoot: string): Promise<void> {
   const config = configManager.getActiveConfig(workspaceRoot);
-  if (config && config.watcher) {
-    fileWatcherManager.startWatcher(workspaceRoot, config);
+  if (!config) return;
+  const key = `${workspaceRoot}-${config.host}`;
+  const enabled = vscode.workspace.getConfiguration('stackerftp', vscode.Uri.file(workspaceRoot)).get<boolean>('enableFileWatcher', false);
+  if (!enabled || (!config.watcher && !config.uploadOnSave)) {
+    fileWatcherManager.stopWatcher(key);
+    return;
   }
+  const watcherConfig: FTPConfig = config.watcher ? config : {
+    ...config,
+    watcher: { files: '**/*', autoUpload: true, autoDelete: false }
+  };
+  fileWatcherManager.startWatcher(workspaceRoot, watcherConfig);
 }
 
 export function deactivate(): void {

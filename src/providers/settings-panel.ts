@@ -103,11 +103,14 @@ export class SettingsPanel implements vscode.Disposable {
   // scanComparison above and therefore never enter this path.
   private readonly diffFullScans = new Set<string>();
   private analyticsProjectFilter = 'all';
+  private transferQueueExpiryTimer?: NodeJS.Timeout;
   private readonly analyticsChangedListener = () => void this.sendAnalytics();
   private readonly transferProgressListener = () => {
     if (!this.panel) return;
     const queue = transferManager.getQueue();
-    const visible = queue.filter(item => item.status === 'pending' || item.status === 'transferring');
+    const now = Date.now();
+    const visible = queue.filter(item => item.status === 'pending' || item.status === 'transferring'
+      || ((item.status === 'completed' || item.status === 'error') && item.endTime && now - item.endTime.getTime() < 8000));
     void this.panel.webview.postMessage({
       type: 'diffTransferQueue',
       items: visible.map(item => {
@@ -125,6 +128,10 @@ export class SettingsPanel implements vscode.Disposable {
         };
       })
     });
+    if (visible.some(item => item.status === 'completed' || item.status === 'error')) {
+      if (this.transferQueueExpiryTimer) clearTimeout(this.transferQueueExpiryTimer);
+      this.transferQueueExpiryTimer = setTimeout(() => this.transferProgressListener(), 8100);
+    }
     const active = queue.filter(item => item.status === 'transferring');
     if (!active.length) return;
     const percentage = Math.round(active.reduce((total, item) => total + Math.min(100, Math.max(0, Number(item.progress) || 0)), 0) / active.length);
@@ -192,6 +199,7 @@ export class SettingsPanel implements vscode.Disposable {
     if (this.localRefreshTimer) clearTimeout(this.localRefreshTimer);
     if (this.cacheWriteTimer) clearTimeout(this.cacheWriteTimer);
     if (this.backgroundRefreshTimer) clearTimeout(this.backgroundRefreshTimer);
+    if (this.transferQueueExpiryTimer) clearTimeout(this.transferQueueExpiryTimer);
     this.panel?.dispose();
     this.panel = undefined;
     this.analyticsStore?.removeListener('changed', this.analyticsChangedListener);

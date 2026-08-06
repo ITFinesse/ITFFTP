@@ -9,6 +9,8 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 - Show queued and active Diff Viewer transfers in the centre column with direction markers and per-file progress.
 - Transfer only differing descendant files when uploading or downloading a folder from the Diff Viewer.
 - Highlight the newer side of a modified file in green and the older side in red.
+- Widen the centre transfer lane and add colored Upload, Download, Sync changed up, and Sync changed down controls.
+- Rename the file-watcher control to Auto Sync and restart it immediately when dashboard settings change.
 - Precompute paired local/remote comparisons after connection and persist size, timestamp, type, and status metadata in VS Code global storage.
 - Render Diff Viewer immediately from its cached snapshot while a deduplicated background scan validates remote state.
 - Update cached local comparison records incrementally from workspace file events instead of repeating a full recursive scan.
@@ -18,6 +20,9 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 
 ### Fixed
 
+- Fall back from unsupported FTP existence probes and atomic renames instead of failing uploads with a `550` response.
+- Enumerate FTP directories with `CWD` plus a bare listing so servers that reject path-based `LIST` probes still refresh correctly.
+- Debounce local Auto Sync uploads until a file has remained unchanged for one full second.
 - Treat Diff Viewer folder actions as recursive operations even though normalized tree paths do not end in a slash.
 - Preserve source-newer overwrite behavior for recursive downloads and report partial folder-transfer failures.
 - Cancel stale comparison generations before they can repaint a newer result.

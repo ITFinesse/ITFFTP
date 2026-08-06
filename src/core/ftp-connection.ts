@@ -87,7 +87,17 @@ export class FTPConnection extends BaseConnection {
   async list(remotePath: string): Promise<FileEntry[]> {
     return this.enqueue(async () => {
       try {
-        const list = await this.client.list(remotePath);
+        // Many FTP servers handle CWD + bare LIST reliably but reject LIST
+        // with a path because the server first performs an unsupported
+        // existence probe. This mirrors established FTP-client behaviour.
+        const originalDir = await this.client.pwd();
+        let list;
+        try {
+          await this.client.cd(normalizeRemotePath(remotePath));
+          list = await this.client.list();
+        } finally {
+          await this.client.cd(originalDir);
+        }
 
         const entries: FileEntry[] = [];
 
@@ -107,12 +117,16 @@ export class FTPConnection extends BaseConnection {
             // For symlinks in FTP, try to determine if it's a directory
             // Note: symlink check is done inline to avoid extra queue operations
             if (type === 'symlink') {
+              const currentDir = await this.client.pwd();
               try {
                 const symlinkPath = normalizeRemotePath(path.join(remotePath, item.name));
-                await this.client.list(symlinkPath);
+                await this.client.cd(symlinkPath);
+                await this.client.list();
                 isSymlinkToDirectory = true;
               } catch {
                 isSymlinkToDirectory = false;
+              } finally {
+                await this.client.cd(currentDir);
               }
             }
 
@@ -139,7 +153,9 @@ export class FTPConnection extends BaseConnection {
 
         return entries;
       } catch (error) {
-        if (!isConnectionClosedError(error)) { logger.error('FTP list error', error); }
+        const message = String((error as Error)?.message || error);
+        if (/\b550\b/i.test(message)) logger.debug(`FTP path is not listable: ${remotePath}`, { message });
+        else if (!isConnectionClosedError(error)) logger.error('FTP list error', error);
         throw error;
       }
     });
@@ -212,7 +228,15 @@ export class FTPConnection extends BaseConnection {
 
     const originalDir = await this.client.pwd();
     try {
-      await this.client.ensureDir(normalizedPath);
+      try {
+        await this.client.ensureDir(normalizedPath);
+      } catch (error) {
+        // Some FTP servers reject basic-ftp's existence probe even when the
+        // directory already exists. Let the transfer itself determine whether
+        // the parent is usable instead of failing a valid upload preflight.
+        if (!/550\s+can'?t check for file existence/i.test(String((error as Error)?.message || error))) throw error;
+        logger.debug(`FTP server cannot probe directory existence for ${normalizedPath}; continuing upload`);
+      }
     } finally {
       await this.client.cd(originalDir);
     }
@@ -259,8 +283,16 @@ export class FTPConnection extends BaseConnection {
           // Target file might not exist - that's OK
         }
 
-        // Rename temp file to target
-        await this.client.rename(tempRemotePath, remotePath);
+        // Rename temp file to target. Servers that reject RNTO's target
+        // existence probe can still accept a normal direct overwrite.
+        try {
+          await this.client.rename(tempRemotePath, remotePath);
+        } catch (error) {
+          if (!/550\s+can'?t check for file existence/i.test(String((error as Error)?.message || error))) throw error;
+          logger.warn(`FTP server rejected atomic rename for ${remotePath}; using direct upload fallback`);
+          await this.client.uploadFrom(localPath, remotePath);
+          try { await this.client.remove(tempRemotePath); } catch { /* Best-effort cleanup. */ }
+        }
       } catch (uploadError) {
         // Clean up temp file on failure
         try {

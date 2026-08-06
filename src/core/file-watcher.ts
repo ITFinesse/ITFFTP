@@ -114,7 +114,7 @@ export class FileWatcher implements vscode.Disposable {
     const timer = setTimeout(() => {
       this.processChange(filePath);
       this.debounceTimers.delete(filePath);
-    }, 500); // 500ms debounce
+    }, 1000); // Wait for one full second without another edit.
 
     this.debounceTimers.set(filePath, timer);
   }
