@@ -23,6 +23,7 @@ import { SettingsPanel } from './providers/settings-panel';
 import { DashboardLauncherProvider } from './providers/dashboard-launcher';
 import { AnalyticsStore } from './core/analytics-store';
 import { FTPConfig } from './types';
+import { isWatcherWriteSuppressed, suppressWatcherWrite } from './core/watcher-suppression';
 
 let remoteExplorerProvider: RemoteExplorerWebviewProvider;
 let remoteTreeProvider: RemoteExplorerTreeProvider;
@@ -45,8 +46,6 @@ const autoUploadConfirmedHosts: Set<string> = new Set();
 
 // Track recently uploaded files to prevent duplicate uploads
 // when both uploadOnSave and watcher.autoUpload are enabled
-const recentlyUploadedFiles: Map<string, number> = new Map();
-const UPLOAD_TRACKING_DURATION_MS = 2000; // 2 seconds
 const AUTO_CONNECT_DELAY_MS = 1500;
 const AUTO_CONNECT_RETRY_DELAY_MS = 3000;
 const MAX_AUTO_CONNECT_RETRIES = 1;
@@ -57,26 +56,14 @@ const autoConnectRetries: Map<string, number> = new Map();
  * Mark a file as recently uploaded to prevent duplicate uploads
  */
 export function markFileAsUploaded(filePath: string): void {
-  recentlyUploadedFiles.set(filePath, Date.now());
-  // Clean up old entries
-  setTimeout(() => {
-    recentlyUploadedFiles.delete(filePath);
-  }, UPLOAD_TRACKING_DURATION_MS);
+  suppressWatcherWrite(filePath, 3000);
 }
 
 /**
  * Check if a file was recently uploaded (within tracking duration)
  */
 export function wasRecentlyUploaded(filePath: string): boolean {
-  const uploadTime = recentlyUploadedFiles.get(filePath);
-  if (!uploadTime) return false;
-
-  const elapsed = Date.now() - uploadTime;
-  if (elapsed > UPLOAD_TRACKING_DURATION_MS) {
-    recentlyUploadedFiles.delete(filePath);
-    return false;
-  }
-  return true;
+  return isWatcherWriteSuppressed(filePath);
 }
 
 export function activate(context: vscode.ExtensionContext): void {

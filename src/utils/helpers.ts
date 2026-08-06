@@ -160,17 +160,24 @@ export function getRelativePath(from: string, to: string): string {
 export function matchesPattern(filePath: string, patterns: string[]): boolean {
   // Ensure patterns is an array to prevent iteration errors on strings/objects
   const patternList = Array.isArray(patterns) ? patterns : [patterns].filter(p => typeof p === 'string');
+  const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
 
-  for (const pattern of patternList) {
+  for (const rawPattern of patternList) {
+    const pattern = String(rawPattern || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
+    if (!pattern) continue;
+    if (!/[?*]/.test(pattern)) {
+      const segments = normalizedPath.split('/');
+      if (normalizedPath === pattern || normalizedPath.startsWith(`${pattern}/`) || segments.includes(pattern)) return true;
+    }
     const regex = new RegExp(
       '^' + pattern
-        .replace(/\./g, '\\.')
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
         .replace(/\*\*/g, '___DOUBLESTAR___')
         .replace(/\*/g, '[^/]*')
         .replace(/\?/g, '.')
         .replace(/___DOUBLESTAR___/g, '.*') + '$'
     );
-    if (regex.test(filePath)) return true;
+    if (regex.test(normalizedPath)) return true;
   }
   return false;
 }

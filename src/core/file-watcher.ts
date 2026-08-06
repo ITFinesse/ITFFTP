@@ -13,7 +13,7 @@ import { connectionManager } from './connection-manager';
 import { transferManager } from './transfer-manager';
 import { logger } from '../utils/logger';
 import { normalizeRemotePath, matchesPattern } from '../utils/helpers';
-import { wasRecentlyUploaded } from '../extension';
+import { isWatcherWriteSuppressed } from './watcher-suppression';
 
 export class FileWatcher implements vscode.Disposable {
   private watchers: Map<string, vscode.FileSystemWatcher> = new Map();
@@ -145,8 +145,8 @@ export class FileWatcher implements vscode.Disposable {
 
           // Check if this file was recently uploaded via uploadOnSave
           // to prevent duplicate uploads
-          if (wasRecentlyUploaded(filePath)) {
-            logger.debug(`Skipping duplicate upload for recently uploaded file: ${relativePath}`);
+          if (isWatcherWriteSuppressed(filePath)) {
+            logger.debug(`Skipping ITFFTP-generated local write: ${relativePath}`);
             return;
           }
 

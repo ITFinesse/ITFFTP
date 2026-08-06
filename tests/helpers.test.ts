@@ -20,6 +20,12 @@ describe('helpers', () => {
     expect(matchesPattern('src/utils/helpers.ts', ['**/*.js'])).toBe(false);
   });
 
+  it('matches ignored folder descendants using Windows paths', () => {
+    expect(matchesPattern('storage\\logs\\app.log', ['storage/logs/**'])).toBe(true);
+    expect(matchesPattern('node_modules\\package\\index.js', ['node_modules'])).toBe(true);
+    expect(matchesPattern('src\\index.ts', ['storage/logs/**', 'node_modules'])).toBe(false);
+  });
+
   it('formatFileSize formats bytes', () => {
     expect(formatFileSize(0)).toBe('0 B');
     expect(formatFileSize(1024)).toBe('1 KB');

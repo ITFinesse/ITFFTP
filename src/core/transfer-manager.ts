@@ -12,6 +12,7 @@ import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 import { generateId, normalizeRemotePath, matchesPattern } from '../utils/helpers';
 import { EventEmitter } from 'stream';
+import { suppressWatcherWrite } from './watcher-suppression';
 
 export interface TransferProgress {
   completed: number;
@@ -369,11 +370,21 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
             }
           }
 
-          await this.withTransferTimeout(
-            connection.download(item.remotePath, item.localPath),
-            TransferManager.TRANSFER_TIMEOUT_MS,
-            `download ${path.basename(item.remotePath)}`
-          );
+          // Downloads write locally and fire the filesystem watcher. Suppress
+          // that event before the first byte is written so Auto Sync cannot
+          // immediately upload the same file back to the server.
+          suppressWatcherWrite(item.localPath, TransferManager.TRANSFER_TIMEOUT_MS + 5000);
+          try {
+            await this.withTransferTimeout(
+              connection.download(item.remotePath, item.localPath),
+              TransferManager.TRANSFER_TIMEOUT_MS,
+              `download ${path.basename(item.remotePath)}`
+            );
+          } finally {
+            // Cover the final filesystem event after success or partial-write
+            // cleanup, without suppressing genuine edits for the full timeout.
+            suppressWatcherWrite(item.localPath, 3000);
+          }
         }
 
         item.status = 'completed';
