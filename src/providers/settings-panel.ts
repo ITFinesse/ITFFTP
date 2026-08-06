@@ -85,9 +85,10 @@ export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private scope?: vscode.Uri;
   private diffRefreshRunning = false;
-  private pendingDiffRefresh?: { value: unknown; generation: number };
+  private pendingDiffRefresh?: { value: unknown; generation: number; key: string };
   private hasPendingDiffRefresh = false;
   private diffScanGeneration = 0;
+  private activeDiffRequestKey?: string;
   private readonly diffDirectoryCache = new Map<string, DiffEntry[]>();
   private readonly latestDiffRecords = new Map<string, DiffRecord>();
   private localWatcher?: vscode.FileSystemWatcher;
@@ -586,8 +587,22 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private async loadRemoteDiff(value: unknown): Promise<void> {
+    const requestedConfig = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+    if (!requestedConfig) throw new Error('Select a host before loading remote files.');
+    const requestKey = [
+      this.scope?.toString() || '',
+      requestedConfig.protocol,
+      requestedConfig.host,
+      requestedConfig.port || '',
+      requestedConfig.username || '',
+      requestedConfig.remotePath || '/'
+    ].join('\n');
+    if (this.diffRefreshRunning && this.activeDiffRequestKey === requestKey) {
+      logger.debug('ITFFTP diff refresh already running for this remote; duplicate request joined the active scan');
+      return;
+    }
     const generation = ++this.diffScanGeneration;
-    this.pendingDiffRefresh = { value, generation };
+    this.pendingDiffRefresh = { value, generation, key: requestKey };
     this.hasPendingDiffRefresh = true;
     if (this.diffRefreshRunning) return;
     this.diffRefreshRunning = true;
@@ -595,10 +610,14 @@ export class SettingsPanel implements vscode.Disposable {
       do {
         const request = this.pendingDiffRefresh;
         this.hasPendingDiffRefresh = false;
-        if (request) await this.loadRemoteDiffOnce(request.value, request.generation);
+        if (request) {
+          this.activeDiffRequestKey = request.key;
+          await this.loadRemoteDiffOnce(request.value, request.generation);
+        }
       } while (this.hasPendingDiffRefresh);
     } finally {
       this.diffRefreshRunning = false;
+      this.activeDiffRequestKey = undefined;
     }
   }
 

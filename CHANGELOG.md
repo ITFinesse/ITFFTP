@@ -23,6 +23,8 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 - Collapse changed descendants beneath a queued recursive folder so Sync changed does not transfer the same files twice.
 - Retire pooled FTP connections immediately after server `FIN` or fatal socket errors instead of repeatedly reusing a dead client.
 - Retry interrupted directory listings once on a fresh pooled connection without flooding the Output channel with duplicate stack traces.
+- Coalesce duplicate refresh requests for the same workspace and remote so healthy comparisons are allowed to finish.
+- Animate an activity pulse across the progress track throughout active scans, including while determinate progress remains at zero.
 
 ## [2.0.1] - 2026-08-04
 

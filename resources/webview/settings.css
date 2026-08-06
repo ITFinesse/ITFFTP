@@ -49,6 +49,9 @@ body{font-size:13px;line-height:1.35}.dashboard-content{padding:18px 22px 24px;f
 .diff-transfer-progress i:after,.diff-transfer-progress.is-active i:after{display:block!important;left:0;width:var(--progress,100%);animation:none!important;transition:width .2s ease}
 .diff-transfer-progress i:after{background:linear-gradient(90deg,#1f8fca,#69d2ff)!important;box-shadow:0 0 8px rgb(79 193 255 / .5)}
 .diff-transfer-progress.is-indeterminate i:after{width:34%!important;animation:itfftp-progress 1s ease-in-out infinite!important}
+.diff-transfer-progress i:before{position:absolute;z-index:2;top:0;bottom:0;left:-24%;display:none;width:24%;border-radius:999px;background:linear-gradient(90deg,transparent,rgb(180 232 255 / .9),transparent);content:"";pointer-events:none}
+.diff-transfer-progress.is-active i:before{display:block;animation:itfftp-activity 1.15s linear infinite}
+@keyframes itfftp-activity{to{left:100%}}
 /* Directional comparison states: blue means local is newer; amber means remote is newer. */
 .tree-file.local-changed .tree-name,.file-status.local-changed{color:#6fc7ff!important}.tree-file.remote-changed .tree-name,.file-status.remote-changed{color:#f3bc66!important}
 
