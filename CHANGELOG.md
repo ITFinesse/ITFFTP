@@ -21,6 +21,8 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 - Verify watcher-dirty, equal-sized files by content to stop identical files remaining incorrectly marked as modified.
 - Display a high-contrast animated progress bar for operations without a numeric percentage and determinate progress for scans and transfers.
 - Collapse changed descendants beneath a queued recursive folder so Sync changed does not transfer the same files twice.
+- Retire pooled FTP connections immediately after server `FIN` or fatal socket errors instead of repeatedly reusing a dead client.
+- Retry interrupted directory listings once on a fresh pooled connection without flooding the Output channel with duplicate stack traces.
 
 ## [2.0.1] - 2026-08-04
 

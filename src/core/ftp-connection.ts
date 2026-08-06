@@ -11,10 +11,21 @@ import { BaseConnection } from './connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { normalizeRemotePath } from '../utils/helpers';
+import { isConnectionClosedError } from './connection-errors';
 
 export class FTPConnection extends BaseConnection {
   private client: Client;
   private keepaliveTimer: NodeJS.Timeout | undefined;
+
+  protected handleOperationError(error: unknown): void {
+    if (!isConnectionClosedError(error)) { return; }
+    if (this.keepaliveTimer) { clearInterval(this.keepaliveTimer); }
+    this.keepaliveTimer = undefined;
+    if (this._connected) {
+      this._connected = false;
+      this.emit('disconnected');
+    }
+  }
 
   constructor(config: FTPConfig) {
     super(config);
@@ -128,7 +139,7 @@ export class FTPConnection extends BaseConnection {
 
         return entries;
       } catch (error) {
-        logger.error('FTP list error', error);
+        if (!isConnectionClosedError(error)) { logger.error('FTP list error', error); }
         throw error;
       }
     });

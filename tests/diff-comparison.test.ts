@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyDiff, collapseRecursiveTransfers } from '../src/core/diff-comparison';
+import { isConnectionClosedError } from '../src/core/connection-errors';
 
 describe('classifyDiff', () => {
   it('treats equal-sized clean files as identical regardless of timestamps', () => {
@@ -30,5 +31,16 @@ describe('collapseRecursiveTransfers', () => {
       { path: 'index.php', type: 'file' as const }
     ]);
     expect(records.map(record => record.path)).toEqual(['assets', 'index.php']);
+  });
+});
+
+describe('isConnectionClosedError', () => {
+  it('recognises a server FIN and common fatal socket failures', () => {
+    expect(isConnectionClosedError(new Error('Client is closed because Server sent FIN packet unexpectedly'))).toBe(true);
+    expect(isConnectionClosedError({ message: 'read ECONNRESET' })).toBe(true);
+  });
+
+  it('does not treat an FTP missing-path response as a dead connection', () => {
+    expect(isConnectionClosedError(new Error("550 Can't check for file existence"))).toBe(false);
   });
 });

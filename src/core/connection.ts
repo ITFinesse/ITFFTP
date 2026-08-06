@@ -70,6 +70,7 @@ export abstract class BaseConnection extends EventEmitter {
           const result = await item.operation();
           item.resolve(result);
         } catch (error) {
+          this.handleOperationError(error);
           item.reject(error);
         }
       }
@@ -100,6 +101,9 @@ export abstract class BaseConnection extends EventEmitter {
   }
 
   abstract connect(): Promise<void>;
+  protected handleOperationError(_error: unknown): void {
+    // Protocol implementations can retire broken transport sessions here.
+  }
   async disconnect(): Promise<void> {
     this.removeAllListeners();
     this.operationQueue = [];

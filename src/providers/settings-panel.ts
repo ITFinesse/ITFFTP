@@ -12,6 +12,7 @@ import { connectionManager } from '../core/connection-manager';
 import { AnalyticsStore } from '../core/analytics-store';
 import { classifyDiff, collapseRecursiveTransfers } from '../core/diff-comparison';
 import { BaseConnection } from '../core/connection';
+import { isConnectionClosedError } from '../core/connection-errors';
 import { FTPConfig } from '../types';
 import { matchesPattern } from '../utils/helpers';
 
@@ -820,7 +821,7 @@ export class SettingsPanel implements vscode.Disposable {
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     const ignored = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
     await connectionManager.connect(config);
-    const connection = await connectionManager.getPooledConnection(config);
+    let connection = await connectionManager.getPooledConnection(config);
     const queue = [startDirectory];
     const visited = new Set<string>();
     const isAffectedPath = (path: string): boolean => {
@@ -854,10 +855,18 @@ export class SettingsPanel implements vscode.Disposable {
         const directory = queue.shift()!;
         if (visited.has(directory)) continue;
         visited.add(directory);
-        const [localEntries, remoteEntries] = await Promise.all([
-          this.getWorkspaceDirectoryEntries(directory, ignored),
-          this.getRemoteDirectoryEntries(connection, config, directory, ignored, directory !== startDirectory)
-        ]);
+        const localEntriesPromise = this.getWorkspaceDirectoryEntries(directory, ignored);
+        let remoteEntries: DiffEntry[];
+        try {
+          remoteEntries = await this.getRemoteDirectoryEntries(connection, config, directory, ignored, directory !== startDirectory);
+        } catch (error) {
+          if (!isConnectionClosedError(error) || config.protocol === 'sftp') { throw error; }
+          connectionManager.releasePooledConnection(config, connection);
+          connection = await connectionManager.getPooledConnection(config);
+          logger.info('ITFFTP scan connection was closed by the server; continuing on a fresh connection');
+          remoteEntries = await this.getRemoteDirectoryEntries(connection, config, directory, ignored, directory !== startDirectory);
+        }
+        const localEntries = await localEntriesPromise;
         const localByPath = new Map(localEntries.map(entry => [entry.path, entry]));
         const remoteByPath = new Map(remoteEntries.map(entry => [entry.path, entry]));
         for (const path of new Set([...localByPath.keys(), ...remoteByPath.keys()])) {
@@ -929,7 +938,8 @@ export class SettingsPanel implements vscode.Disposable {
       this.diffDirectoryCache.set(cacheKey, entries);
       return entries;
     } catch (error) {
-      if (allowMissing) return [];
+      const message = error instanceof Error ? error.message : String(error);
+      if (allowMissing && /^550\b|\b550\b.*(?:not found|no such|existence)|no such file|not found/i.test(message)) { return []; }
       throw error;
     }
   }
