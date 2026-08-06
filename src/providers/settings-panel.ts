@@ -10,6 +10,8 @@ import { configManager } from '../core/config';
 import { transferManager } from '../core/transfer-manager';
 import { connectionManager } from '../core/connection-manager';
 import { AnalyticsStore } from '../core/analytics-store';
+import { classifyDiff, collapseRecursiveTransfers } from '../core/diff-comparison';
+import { BaseConnection } from '../core/connection';
 import { FTPConfig } from '../types';
 import { matchesPattern } from '../utils/helpers';
 
@@ -82,8 +84,9 @@ export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private scope?: vscode.Uri;
   private diffRefreshRunning = false;
-  private pendingDiffRefresh: unknown;
+  private pendingDiffRefresh?: { value: unknown; generation: number };
   private hasPendingDiffRefresh = false;
+  private diffScanGeneration = 0;
   private readonly diffDirectoryCache = new Map<string, DiffEntry[]>();
   private readonly latestDiffRecords = new Map<string, DiffRecord>();
   private localWatcher?: vscode.FileSystemWatcher;
@@ -174,6 +177,7 @@ export class SettingsPanel implements vscode.Disposable {
 
   public initialize(scope: vscode.Uri): void {
     const changedScope = this.scope?.toString() !== scope.toString();
+    if (changedScope) this.diffScanGeneration++;
     this.scope = scope;
     if (changedScope || !this.localWatcher) this.ensureLocalWatcher(scope);
     const config = configManager.getConfigs(scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(scope.fsPath)[0];
@@ -270,12 +274,18 @@ export class SettingsPanel implements vscode.Disposable {
   private async persistComparisonCache(config: FTPConfig): Promise<void> {
     const file = this.cacheFile(config);
     if (!file) return;
+    const temporary = vscode.Uri.joinPath(
+      vscode.Uri.joinPath(this.globalStorageUri!, 'diff-cache'),
+      `${file.path.split('/').pop()}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
+    );
     try {
       const payload = JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), records: [...this.latestDiffRecords.values()] });
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.globalStorageUri!, 'diff-cache'));
-      await vscode.workspace.fs.writeFile(file, new TextEncoder().encode(payload));
+      await vscode.workspace.fs.writeFile(temporary, new TextEncoder().encode(payload));
+      await vscode.workspace.fs.rename(temporary, file, { overwrite: true });
     } catch (error) {
       logger.warn('Unable to persist ITFFTP comparison cache', error);
+      try { await vscode.workspace.fs.delete(temporary); } catch { /* Another window may already have replaced the cache. */ }
     }
   }
 
@@ -575,91 +585,33 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private async loadRemoteDiff(value: unknown): Promise<void> {
-    this.pendingDiffRefresh = value;
+    const generation = ++this.diffScanGeneration;
+    this.pendingDiffRefresh = { value, generation };
     this.hasPendingDiffRefresh = true;
     if (this.diffRefreshRunning) return;
     this.diffRefreshRunning = true;
     try {
       do {
-        const requestedValue = this.pendingDiffRefresh;
+        const request = this.pendingDiffRefresh;
         this.hasPendingDiffRefresh = false;
-        await this.loadRemoteDiffOnce(requestedValue);
+        if (request) await this.loadRemoteDiffOnce(request.value, request.generation);
       } while (this.hasPendingDiffRefresh);
     } finally {
       this.diffRefreshRunning = false;
     }
   }
 
-  private async loadRemoteDiffOnce(value: unknown): Promise<void> {
+  private async loadRemoteDiffOnce(value: unknown, generation: number): Promise<void> {
     const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) throw new Error('Select a host before loading remote files.');
-    await this.scanComparison(config);
-    return;
-
-    try {
-      const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
-      if (!config) throw new Error('Select a host before loading remote files.');
-      const connection = await connectionManager.connect(config);
-      const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$|(?<!^)\/+/g, '/').replace(/\/$/, '') || '/';
-      const entries: Array<{ path: string; type: 'file' | 'directory'; status: string; size?: number; modifyTime?: number }> = [];
-      const ignoredPatterns = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
-      const localFilesPromise = this.getWorkspaceFiles(ignoredPatterns);
-      const localFileStatsPromise = localFilesPromise.then(files => this.getWorkspaceFileStats(files));
-      const queue = [root];
-      const visited = new Set<string>();
-      let lastPublishedAt = 0;
-
-      const publish = async (complete: boolean): Promise<void> => {
-        const [localFiles, localFileStats] = await Promise.all([localFilesPromise, localFileStatsPromise]);
-        const scannedDirectories = visited.size;
-        const label = complete
-          ? `File comparison updated (${entries.length} remote entries)`
-          : `Scanning remote files: ${scannedDirectories} folder${scannedDirectories === 1 ? '' : 's'}, ${entries.length} entries`;
-        this.panel?.webview.postMessage({
-          type: 'remoteDiff', root, files: entries, localFiles, localFileStats,
-          complete, scannedDirectories, pendingDirectories: queue.length
-        });
-        this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: !complete, label });
-        lastPublishedAt = Date.now();
-      };
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: 'Scanning remote root…' });
-      logger.info(`ITFFTP diff scan started: ${root}`);
-      while (queue.length && entries.length < 10000) {
-        const current = queue.shift()!;
-        if (visited.has(current)) continue;
-        visited.add(current);
-        const listed = await connection.list(current);
-        for (const item of listed) {
-          const absolute = String(item.path || `${current}/${item.name}`).replace(/\\/g, '/');
-          const relative = absolute === root ? '' : absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : absolute.replace(/^\/+/, '');
-          if (!relative) continue;
-          if (this.isIgnoredDiffPath(relative, ignoredPatterns)) continue;
-          const directory = item.type === 'directory';
-          entries.push({ path: `${relative}${directory ? '/' : ''}`, type: directory ? 'directory' : 'file', status: directory ? '' : 'remote', size: Number(item.size || 0), modifyTime: item.modifyTime instanceof Date ? item.modifyTime.getTime() : Number(item.modifyTime || 0) });
-          if (directory && entries.length < 10000) queue.push(absolute.replace(/\/$/, ''));
-        }
-
-        // Stream a partial tree instead of withholding all results until a
-        // large FTP hierarchy has finished enumerating.
-        if (visited.size === 1 || visited.size % 8 === 0 || Date.now() - lastPublishedAt >= 1000) {
-          await publish(false);
-        }
-      }
-      await publish(true);
-      logger.info(`ITFFTP diff scan complete: ${visited.size} folders, ${entries.length} remote entries`);
-    } catch (error: any) {
-      logger.error('ITFFTP diff scan failed', error);
-      this.panel?.webview.postMessage({ type: 'remoteDiffError', message: error?.message || String(error) });
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Unable to refresh file comparison' });
-      statusBar.error(`Unable to load remote diff: ${error?.message || error}`, true);
-    }
+    await this.scanComparison(config, '', generation);
   }
 
   private async loadRemoteDiffFolder(value: unknown, relativePath: unknown): Promise<void> {
     const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) throw new Error('Select a host before loading remote files.');
     const relativeDirectory = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-    await this.scanComparison(config, relativeDirectory);
+    await this.scanComparison(config, relativeDirectory, ++this.diffScanGeneration, true);
   }
 
   private async syncChanged(direction: 'up' | 'down'): Promise<void> {
@@ -669,13 +621,14 @@ export class SettingsPanel implements vscode.Disposable {
     if (!this.latestDiffRecords.size) throw new Error('No comparison data available. Open the diff viewer first.');
 
     const changedStatuses = new Set(['modified', 'missing-local', 'missing-remote', 'type-changed']);
-    const candidates = [...this.latestDiffRecords.values()].filter(record => {
+    const rawCandidates = [...this.latestDiffRecords.values()].filter(record => {
       if (!changedStatuses.has(record.status)) return false;
       if (direction === 'up') {
         return record.status === 'modified' || record.status === 'missing-remote' || record.status === 'type-changed';
       }
       return record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed';
     });
+    const candidates = collapseRecursiveTransfers(rawCandidates);
 
     if (candidates.length === 0) {
       statusBar.info(`No changed files to sync ${direction === 'up' ? 'up' : 'down'}.`);
@@ -762,8 +715,24 @@ export class SettingsPanel implements vscode.Disposable {
         }
       }
     }
+    const refreshRoots = new Map<string, boolean>();
+    for (const syncedPath of syncedPaths) {
+      const normalized = syncedPath.replace(/\/$/, '');
+      const record = this.latestDiffRecords.get(normalized);
+      const parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
+      refreshRoots.set(parent, refreshRoots.get(parent) || false);
+      if (record?.type === 'directory') refreshRoots.set(normalized, true);
+    }
+    for (const [refreshRoot, recursive] of [...refreshRoots.entries()].sort((left, right) => left[0].split('/').length - right[0].split('/').length)) {
+      const remoteRoot = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+      const remoteDirectory = refreshRoot ? `${remoteRoot}/${refreshRoot}` : remoteRoot;
+      const cachePrefix = `${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`;
+      for (const key of [...this.diffDirectoryCache.keys()]) {
+        if (key === cachePrefix || (recursive && key.startsWith(`${cachePrefix}/`))) this.diffDirectoryCache.delete(key);
+      }
+      await this.scanComparison(config, refreshRoot, ++this.diffScanGeneration, true, recursive);
+    }
     this.scheduleComparisonCacheWrite(config);
-    await this.loadRemoteDiff(config);
   }
 
   private async loadRemoteDiffDirectory(config: FTPConfig, relativeDirectory: string, background = false): Promise<Array<{ path: string; type: 'file' | 'directory'; status: string; size?: number; modifyTime?: number }>> {
@@ -839,22 +808,49 @@ export class SettingsPanel implements vscode.Disposable {
    * single record for each relative path.  This deliberately never sends a
    * free-standing local list and remote list for the webview to reconcile.
    */
-  private async scanComparison(config: FTPConfig, startDirectory = ''): Promise<void> {
+  private async scanComparison(
+    config: FTPConfig,
+    startDirectory = '',
+    generation = ++this.diffScanGeneration,
+    partial = false,
+    recursive = true
+  ): Promise<void> {
     const cacheFile = this.cacheFile(config);
     if (cacheFile) this.activeComparisonCacheKey = cacheFile.toString();
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     const ignored = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
-    const connection = await connectionManager.connect(config);
+    await connectionManager.connect(config);
+    const connection = await connectionManager.getPooledConnection(config);
     const queue = [startDirectory];
     const visited = new Set<string>();
-    const records = new Map<string, DiffRecord>();
+    const isAffectedPath = (path: string): boolean => {
+      if (!startDirectory) return recursive || !path.includes('/');
+      if (path === startDirectory) return true;
+      if (!path.startsWith(`${startDirectory}/`)) return false;
+      return recursive || !path.slice(startDirectory.length + 1).includes('/');
+    };
+    const previousAffectedPaths = partial
+      ? [...this.latestDiffRecords.keys()].filter(isAffectedPath)
+      : [...this.latestDiffRecords.keys()];
+    const records = partial ? new Map(this.latestDiffRecords) : new Map<string, DiffRecord>();
+    if (partial) {
+      for (const path of previousAffectedPaths) {
+        if (path !== startDirectory) records.delete(path);
+      }
+    }
     let reportedPercentage = 0;
-    this.latestDiffRecords.clear();
-    this.panel?.webview.postMessage({ type: 'diffStart', root, startDirectory });
+    if (!partial) {
+      this.latestDiffRecords.clear();
+      this.panel?.webview.postMessage({ type: 'diffStart', root, startDirectory });
+    }
     this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: 'Comparing local and remote files…', percentage: 0 });
     logger.info(`ITFFTP paired diff scan started: ${root}${startDirectory ? `/${startDirectory}` : ''}`);
     try {
       while (queue.length && visited.size < 10000) {
+        if (generation !== this.diffScanGeneration) {
+          logger.info('ITFFTP paired diff scan superseded by a newer refresh');
+          return;
+        }
         const directory = queue.shift()!;
         if (visited.has(directory)) continue;
         visited.add(directory);
@@ -874,20 +870,31 @@ export class SettingsPanel implements vscode.Disposable {
             remote: remote && { size: remote.size, modifyTime: remote.modifyTime },
             status: 'same'
           });
-          if (type === 'directory') queue.push(path);
+          if (type === 'directory' && recursive) queue.push(path);
         }
+        await this.clearFalseDirtyFlags(connection, config, [...new Set([...localByPath.keys(), ...remoteByPath.keys()])], records);
         for (const record of records.values()) {
           record.status = this.diffStatus(record);
           if (record.status === 'same') this.localDirtyPaths.delete(record.path);
         }
         this.latestDiffRecords.clear();
         for (const [path, record] of records) this.latestDiffRecords.set(path, record);
-        this.panel?.webview.postMessage({ type: 'diffBatch', records: [...records.values()], scannedDirectories: visited.size, pendingDirectories: queue.length, complete: queue.length === 0 });
+        if (!partial) {
+          this.panel?.webview.postMessage({ type: 'diffBatch', records: [...records.values()], scannedDirectories: visited.size, pendingDirectories: queue.length, complete: queue.length === 0 });
+        }
         const denominator = Math.max(1, visited.size + queue.length);
         reportedPercentage = Math.max(reportedPercentage, Math.min(95, Math.round((visited.size / denominator) * 95)));
         this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Compared ${visited.size} folder${visited.size === 1 ? '' : 's'}…`, percentage: reportedPercentage });
       }
-      this.panel?.webview.postMessage({ type: 'diffScanComplete', records: [...records.values()], folders: visited.size });
+      if (generation !== this.diffScanGeneration) return;
+      if (partial) {
+        const affected = [...records.values()].filter(record => isAffectedPath(record.path));
+        const currentPaths = new Set(affected.map(record => record.path));
+        const removed = previousAffectedPaths.filter(path => !currentPaths.has(path));
+        this.panel?.webview.postMessage({ type: 'diffPatch', records: affected, removed });
+      } else {
+        this.panel?.webview.postMessage({ type: 'diffScanComplete', records: [...records.values()], folders: visited.size });
+      }
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `Comparison updated (${records.size} paths)`, percentage: 100 });
       this.scheduleComparisonCacheWrite(config);
       const statusCounts = [...records.values()].reduce<Record<string, number>>((counts, record) => {
@@ -896,9 +903,12 @@ export class SettingsPanel implements vscode.Disposable {
       }, {});
       logger.info(`ITFFTP paired diff scan complete: ${visited.size} folders, ${records.size} paths; ${JSON.stringify(statusCounts)}`);
     } catch (error: any) {
+      if (generation !== this.diffScanGeneration) return;
       logger.error('ITFFTP paired diff scan failed', error);
       this.panel?.webview.postMessage({ type: 'remoteDiffError', message: error?.message || String(error) });
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Unable to refresh file comparison' });
+    } finally {
+      connectionManager.releasePooledConnection(config, connection);
     }
   }
 
@@ -925,15 +935,45 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private diffStatus(record: DiffRecord): DiffRecord['status'] {
-    if (!record.local) return 'missing-local';
-    if (!record.remote) return 'missing-remote';
-    if (record.type === 'directory') return 'same';
-    if (record.local.size !== record.remote.size) return 'modified';
-    if (this.localDirtyPaths.has(record.path)) return 'modified';
-    // FileZilla's size-comparison mode treats equal byte sizes as identical.
-    // Date comparison is a separate mode; mixing it here created false
-    // positives for identical files whose remote upload time had changed.
-    return 'same';
+    return classifyDiff(record, this.localDirtyPaths.has(record.path));
+  }
+
+  /**
+   * Watchers report metadata-only writes as changes. For dirty, equal-sized
+   * files, verify bytes before showing a modification. This keeps fast
+   * size-based comparison for the normal scan while removing false positives.
+   */
+  private async clearFalseDirtyFlags(
+    connection: BaseConnection,
+    config: FTPConfig,
+    paths: string[],
+    records: Map<string, DiffRecord>
+  ): Promise<void> {
+    if (!this.scope) return;
+    const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+    const candidates = paths
+      .map(path => records.get(path))
+      .filter((record): record is DiffRecord => Boolean(
+        record?.type === 'file' &&
+        record.local &&
+        record.remote &&
+        record.local.size === record.remote.size &&
+        this.localDirtyPaths.has(record.path) &&
+        Number(record.local.size || 0) <= 5 * 1024 * 1024
+      ))
+      .slice(0, 32);
+
+    for (const record of candidates) {
+      try {
+        const local = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.scope, ...record.path.split('/')));
+        const remote = await connection.readFile(`${root}/${record.path}`);
+        if (Buffer.from(local).equals(Buffer.from(remote))) {
+          this.localDirtyPaths.delete(record.path);
+        }
+      } catch {
+        // Keep the watcher-derived modified state when verification is unavailable.
+      }
+    }
   }
 
   private async readDiffFile(direction: 'local' | 'remote', relativePath: unknown, value: unknown): Promise<void> {
@@ -1030,11 +1070,13 @@ export class SettingsPanel implements vscode.Disposable {
         if (dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`)) this.localDirtyPaths.delete(dirtyPath);
       }
     }
-    this.diffDirectoryCache.clear();
+    const normalizedPath = filePath.replace(/\/$/, '');
+    const parentPath = normalizedPath.includes('/') ? normalizedPath.slice(0, normalizedPath.lastIndexOf('/')) : '';
+    const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+    const remoteDirectory = parentPath ? `${root}/${parentPath}` : root;
+    this.diffDirectoryCache.delete(`${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`);
     logger.info(`ITFFTP diff ${action} completed: ${filePath}; refreshing paired comparison`);
-    // A second fire-and-forget scan could publish its stale pre-transfer
-    // listing after the fresh scan.  Finish the single queued refresh first.
-    await this.loadRemoteDiff(config);
+    await this.refreshAfterTransfer([filePath]);
     this.panel?.webview.postMessage({ type: 'diffActionComplete', action, direction, path: filePath });
   }
 

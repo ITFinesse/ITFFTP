@@ -84,7 +84,7 @@ function renderDiffTree(side) {
     for (const record of entries) {
     const parts = record.path.split('/');
     const folder = record.type === 'directory'; const present = side === 'local' ? record.local : record.remote; const state = present ? record.status : (side === 'local' ? 'missing-local' : 'missing-remote');
-    rows.push(`<button type="button" role="treeitem" class="file-row ${folder ? 'is-folder' : 'is-file'} ${selectedPath === record.path && selectedSide === side ? 'is-selected' : ''} ${present ? '' : 'is-placeholder'}" data-path="${esc(record.path)}" data-side="${side}" data-folder="${folder ? 'true' : ''}" style="padding-left:${12 + depth * 16}px"><span class="codicon ${folder ? (diff.collapsed.has(record.path) ? 'codicon-chevron-right' : 'codicon-chevron-down') : 'codicon-file'}"></span><span class="tree-name">${esc(parts.at(-1))}</span><span class="file-status ${esc(state)}">${present ? esc(state.replace('-', ' ')) : side === 'local' ? 'missing locally' : 'missing remotely'}</span></button>`);
+    rows.push(`<button type="button" role="treeitem" class="file-row ${folder ? 'is-folder' : 'is-file'} ${selectedPath === record.path && selectedSide === side ? 'is-selected' : ''} ${present ? '' : 'is-placeholder'} status-${esc(state)}" data-path="${esc(record.path)}" data-side="${side}" data-folder="${folder ? 'true' : ''}" style="padding-left:${12 + depth * 16}px"><span class="codicon ${folder ? (diff.collapsed.has(record.path) ? 'codicon-chevron-right' : 'codicon-chevron-down') : 'codicon-file'}"></span><span class="tree-name">${esc(parts.at(-1))}</span><span class="file-status ${esc(state)}">${present ? esc(state.replace('-', ' ')) : side === 'local' ? 'missing locally' : 'missing remotely'}</span></button>`);
     if (folder && !diff.collapsed.has(record.path)) addChildren(record.path, depth + 1);
     }
   }
@@ -141,7 +141,7 @@ function showContext(x, y, path, side, folder) {
   setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
 }
 function applyDashboardZoom(value) { document.documentElement.style.zoom = `${Math.min(160, Math.max(80, Number(value) || 110))}%`; }
-function progress(active, label, percentage) { const amount = Math.min(100, Math.max(0, Number.isFinite(Number(percentage)) ? Number(percentage) : (active ? 0 : 100))); $('diffTransferLabel').textContent = label; $('diffTransferPercent').textContent = `${Math.round(amount)}%`; $('diffTransferProgress').style.setProperty('--progress', `${amount}%`); $('diffTransferProgress').classList.toggle('is-active', active); }
+function progress(active, label, percentage) { const determinate = Number.isFinite(Number(percentage)); const amount = Math.min(100, Math.max(0, determinate ? Number(percentage) : (active ? 0 : 100))); $('diffTransferLabel').textContent = label; $('diffTransferPercent').textContent = active && !determinate ? 'Working' : `${Math.round(amount)}%`; $('diffTransferProgress').style.setProperty('--progress', `${amount}%`); $('diffTransferProgress').classList.toggle('is-active', active); $('diffTransferProgress').classList.toggle('is-indeterminate', active && !determinate); }
 const analyticsCharts = {};
 function formatBytes(value) { const bytes = Number(value) || 0; if (bytes < 1024) return `${bytes} B`; if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`; return `${(bytes / 1073741824).toFixed(1)} GB`; }
 function drawChart(id, config) { if (typeof Chart !== 'function' || !$(id)) return; if (analyticsCharts[id]) analyticsCharts[id].destroy(); analyticsCharts[id] = new Chart($(id).getContext('2d'), config); }
@@ -178,6 +178,7 @@ window.addEventListener('message', event => { const data = event.data || {};
   if (data.type === 'workspaceFiles') { workspaceFiles = Array.isArray(data.workspaceFiles) ? data.workspaceFiles : []; renderIgnoreEditor(); }
   if (data.type === 'diffStart') { diff.records.clear(); $('diffRemoteRoot').value = data.root || '/'; renderDiff(); }
   if (data.type === 'diffBatch' || data.type === 'diffScanComplete') { (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
+  if (data.type === 'diffPatch') { (data.removed || []).forEach(path => diff.records.delete(path)); (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
   if (data.type === 'diffTransferProgress') progress(Boolean(data.active), data.label || 'Working…', data.percentage);
   if (data.type === 'diffActionComplete') { renderDiff(); }
   if (data.type === 'diffFile' && data.path === selectedPath) { if (data.direction === 'local') diff.localContent = data.content; else diff.remoteContent = data.content; renderFileDiff(); }

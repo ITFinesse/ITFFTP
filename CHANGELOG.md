@@ -9,11 +9,18 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 - Precompute paired local/remote comparisons after connection and persist size, timestamp, type, and status metadata in VS Code global storage.
 - Render Diff Viewer immediately from its cached snapshot while a deduplicated background scan validates remote state.
 - Update cached local comparison records incrementally from workspace file events instead of repeating a full recursive scan.
+- Isolate recursive FTP comparison scans from interactive reads and transfers by using a dedicated pooled connection.
+- Reconcile only the transferred file's parent or transferred folder's subtree and patch affected rows instead of rescanning the whole remote site.
+- Write workspace-keyed comparison snapshots atomically so multiple VS Code windows cannot expose partially written cache data.
 
 ### Fixed
 
 - Treat Diff Viewer folder actions as recursive operations even though normalized tree paths do not end in a slash.
 - Preserve source-newer overwrite behavior for recursive downloads and report partial folder-transfer failures.
+- Cancel stale comparison generations before they can repaint a newer result.
+- Verify watcher-dirty, equal-sized files by content to stop identical files remaining incorrectly marked as modified.
+- Display a high-contrast animated progress bar for operations without a numeric percentage and determinate progress for scans and transfers.
+- Collapse changed descendants beneath a queued recursive folder so Sync changed does not transfer the same files twice.
 
 ## [2.0.1] - 2026-08-04
 
