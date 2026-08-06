@@ -247,7 +247,7 @@ export class SFTPConnection extends BaseConnection {
         concurrency: 128,
         chunkSize: 262144, // 256KB
         step: (transferred) => {
-          this.emitProgress(path.basename(remotePath), transferred, 0);
+          this.emitProgress(remotePath, transferred, 0);
         }
       }, (err) => {
         if (err) reject(err);
@@ -288,7 +288,7 @@ export class SFTPConnection extends BaseConnection {
         concurrency: 128,
         chunkSize: 262144, // 256KB
         step: (transferred) => {
-          this.emitProgress(path.basename(localPath), transferred, totalSize);
+          this.emitProgress(localPath, transferred, totalSize);
         }
       }, (err) => {
         if (err) {

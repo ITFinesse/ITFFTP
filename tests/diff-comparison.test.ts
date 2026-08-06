@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyDiff, collapseRecursiveTransfers } from '../src/core/diff-comparison';
+import { classifyDiff, collapseRecursiveTransfers, newerSide } from '../src/core/diff-comparison';
 import { isConnectionClosedError } from '../src/core/connection-errors';
 
 describe('classifyDiff', () => {
@@ -19,6 +19,17 @@ describe('classifyDiff', () => {
 
   it('does not mark paired directories modified', () => {
     expect(classifyDiff({ type: 'directory', local: {}, remote: {} }, true)).toBe('same');
+  });
+});
+
+describe('newerSide', () => {
+  it('uses millisecond timestamps to identify the newer peer', () => {
+    expect(newerSide({ type: 'file', local: { modifyTime: 2001 }, remote: { modifyTime: 2000 } })).toBe('local');
+    expect(newerSide({ type: 'file', local: { modifyTime: 2000 }, remote: { modifyTime: 2001 } })).toBe('remote');
+  });
+
+  it('treats a watcher-dirty local file as newer', () => {
+    expect(newerSide({ type: 'file', local: { modifyTime: 2000 }, remote: { modifyTime: 2000 } }, true)).toBe('local');
   });
 });
 

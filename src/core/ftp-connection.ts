@@ -177,6 +177,7 @@ export class FTPConnection extends BaseConnection {
   private async _download(remotePath: string, localPath: string): Promise<void> {
     try {
       this.emit('transferStart', { direction: 'download', remotePath, localPath });
+      this.client.trackProgress(info => this.emitProgress(remotePath, info.bytes, 0));
 
       // Ensure directory exists
       const localDir = path.dirname(localPath);
@@ -198,6 +199,8 @@ export class FTPConnection extends BaseConnection {
     } catch (error) {
       logger.error('FTP download error', error);
       throw error;
+    } finally {
+      this.client.trackProgress();
     }
   }
 
@@ -222,6 +225,7 @@ export class FTPConnection extends BaseConnection {
   private async _upload(localPath: string, remotePath: string): Promise<void> {
     try {
       this.emit('transferStart', { direction: 'upload', localPath, remotePath });
+      this.client.trackProgress(info => this.emitProgress(localPath, info.bytes, 0));
 
       // Ensure parent directory exists before uploading
       const parentDir = path.dirname(remotePath);
@@ -271,6 +275,8 @@ export class FTPConnection extends BaseConnection {
     } catch (error) {
       logger.error('FTP upload error', error);
       throw error;
+    } finally {
+      this.client.trackProgress();
     }
   }
 

@@ -6,6 +6,9 @@ All notable changes to ITFFTP will be documented in this file. Historical releas
 
 ### Changed
 
+- Show queued and active Diff Viewer transfers in the centre column with direction markers and per-file progress.
+- Transfer only differing descendant files when uploading or downloading a folder from the Diff Viewer.
+- Highlight the newer side of a modified file in green and the older side in red.
 - Precompute paired local/remote comparisons after connection and persist size, timestamp, type, and status metadata in VS Code global storage.
 - Render Diff Viewer immediately from its cached snapshot while a deduplicated background scan validates remote state.
 - Update cached local comparison records incrementally from workspace file events instead of repeating a full recursive scan.

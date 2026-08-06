@@ -1,7 +1,7 @@
 export type ComparableFile = {
   type: 'file' | 'directory';
-  local?: { size?: number };
-  remote?: { size?: number };
+  local?: { size?: number; modifyTime?: number };
+  remote?: { size?: number; modifyTime?: number };
 };
 
 export type DiffStatus = 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
@@ -13,6 +13,15 @@ export function classifyDiff(record: ComparableFile, locallyDirty = false): Diff
   if (record.type === 'directory') { return 'same'; }
   if (record.local.size !== record.remote.size) { return 'modified'; }
   return locallyDirty ? 'modified' : 'same';
+}
+
+export function newerSide(record: ComparableFile, locallyDirty = false): 'local' | 'remote' | undefined {
+  if (record.type !== 'file' || !record.local || !record.remote) { return undefined; }
+  if (locallyDirty) { return 'local'; }
+  const localTime = Number(record.local.modifyTime) || 0;
+  const remoteTime = Number(record.remote.modifyTime) || 0;
+  if (localTime <= 0 || remoteTime <= 0 || localTime === remoteTime) { return undefined; }
+  return localTime > remoteTime ? 'local' : 'remote';
 }
 
 /** Remove child actions already covered by a recursive directory transfer. */

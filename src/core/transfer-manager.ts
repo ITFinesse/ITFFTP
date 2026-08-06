@@ -213,6 +213,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       this.emit('transferStart', item);
 
       let pooledConnection: BaseConnection | undefined;
+      let progressConnection: BaseConnection | undefined;
+      let transferProgressListener: ((progress: { filename: string; transferred: number; total: number; percentage: number }) => void) | undefined;
       let timedOut = false;
       try {
         if (!item.config) {
@@ -222,6 +224,16 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
         // Acquire a pooled connection for parallel transfers
         pooledConnection = await connectionManager.getPooledConnection(item.config);
         const connection = pooledConnection;
+        const expectedProgressPath = item.direction === 'upload' ? item.localPath : item.remotePath;
+        transferProgressListener = (progress): void => {
+          if (progress.filename !== expectedProgressPath) return;
+          item.transferred = Math.max(0, Number(progress.transferred) || 0);
+          const total = Math.max(0, Number(item.size) || Number(progress.total) || 0);
+          item.progress = total > 0 ? Math.min(99, Math.round((item.transferred / total) * 100)) : 0;
+          this.emitQueueUpdate();
+        };
+        progressConnection = connection;
+        progressConnection.on('progress', transferProgressListener);
 
         if (item.direction === 'upload') {
           // Fill missing local size lazily to keep queueing fast for large folders.
@@ -385,6 +397,9 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           if ((item as any).reject) (item as any).reject(error);
         }
       } finally {
+        if (progressConnection && transferProgressListener) {
+          progressConnection.removeListener('progress', transferProgressListener);
+        }
         if (timedOut && pooledConnection && item.config) {
           const primary = connectionManager.getConnection(item.config);
           const isPrimary = primary === pooledConnection;

@@ -10,7 +10,7 @@ import { configManager } from '../core/config';
 import { transferManager } from '../core/transfer-manager';
 import { connectionManager } from '../core/connection-manager';
 import { AnalyticsStore } from '../core/analytics-store';
-import { classifyDiff, collapseRecursiveTransfers } from '../core/diff-comparison';
+import { classifyDiff, collapseRecursiveTransfers, newerSide } from '../core/diff-comparison';
 import { BaseConnection } from '../core/connection';
 import { isConnectionClosedError } from '../core/connection-errors';
 import { FTPConfig } from '../types';
@@ -31,6 +31,7 @@ type DiffRecord = {
   local?: Omit<DiffEntry, 'path' | 'type'>;
   remote?: Omit<DiffEntry, 'path' | 'type'>;
   status: 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
+  newer?: 'local' | 'remote';
 };
 
 const DEFAULT_IGNORE_PATTERNS = [
@@ -104,8 +105,28 @@ export class SettingsPanel implements vscode.Disposable {
   private analyticsProjectFilter = 'all';
   private readonly analyticsChangedListener = () => void this.sendAnalytics();
   private readonly transferProgressListener = () => {
-    const active = transferManager.getQueue().filter(item => item.status === 'transferring');
-    if (!active.length || !this.panel) return;
+    if (!this.panel) return;
+    const queue = transferManager.getQueue();
+    const visible = queue.filter(item => item.status === 'pending' || item.status === 'transferring');
+    void this.panel.webview.postMessage({
+      type: 'diffTransferQueue',
+      items: visible.map(item => {
+        const remoteRoot = (item.config?.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+        const normalized = item.remotePath.replace(/\\/g, '/');
+        const relativePath = normalized.startsWith(`${remoteRoot}/`) ? normalized.slice(remoteRoot.length + 1) : normalized.replace(/^\/+/, '');
+        return {
+          id: item.id,
+          path: relativePath || normalized,
+          direction: item.direction,
+          status: item.status,
+          progress: Math.min(100, Math.max(0, Number(item.progress) || 0)),
+          transferred: Math.max(0, Number(item.transferred) || 0),
+          size: Math.max(0, Number(item.size) || 0)
+        };
+      })
+    });
+    const active = queue.filter(item => item.status === 'transferring');
+    if (!active.length) return;
     const percentage = Math.round(active.reduce((total, item) => total + Math.min(100, Math.max(0, Number(item.progress) || 0)), 0) / active.length);
     const label = active.length === 1
       ? `${active[0].direction === 'upload' ? 'Uploading' : 'Downloading'} ${active[0].remotePath.split('/').pop() || active[0].remotePath}`
@@ -312,6 +333,7 @@ export class SettingsPanel implements vscode.Disposable {
         status: 'same'
       };
       record.status = this.diffStatus(record);
+      record.newer = record.status === 'modified' ? newerSide(record, this.localDirtyPaths.has(record.path)) : undefined;
       this.latestDiffRecords.set(relativePath, record);
     } catch {
       if (current?.remote) {
@@ -331,6 +353,7 @@ export class SettingsPanel implements vscode.Disposable {
         case 'ready':
           logger.info('ITFFTP dashboard is ready; sending settings');
           await this.sendSettings();
+          this.transferProgressListener();
           break;
         case 'loadSettings':
           logger.info('ITFFTP dashboard requested settings');
@@ -903,6 +926,7 @@ export class SettingsPanel implements vscode.Disposable {
         await this.clearFalseDirtyFlags(connection, config, [...new Set([...localByPath.keys(), ...remoteByPath.keys()])], records);
         for (const record of records.values()) {
           record.status = this.diffStatus(record);
+          record.newer = record.status === 'modified' ? newerSide(record, this.localDirtyPaths.has(record.path)) : undefined;
           if (record.status === 'same') this.localDirtyPaths.delete(record.path);
         }
         this.latestDiffRecords.clear();
@@ -1057,9 +1081,31 @@ export class SettingsPanel implements vscode.Disposable {
     const remotePath = `${remoteRoot}/${filePath.replace(/\/$/, '')}`;
     const record = this.latestDiffRecords.get(filePath);
     const localUri = vscode.Uri.joinPath(this.scope, ...relativeSegments);
+    let transferredPaths: string[] | undefined;
     if (action === 'upload' && direction === 'local') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Uploading ${filePath}`, percentage: 0 });
-      if (isDirectory) await transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, transferConfig);
+      if (isDirectory) {
+        const changedFiles = this.getChangedSubtreeFiles(filePath, 'upload');
+        if (!changedFiles.length) {
+          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files under ${filePath}`, percentage: 100 });
+          return;
+        }
+        const settled = await Promise.allSettled(changedFiles.map(candidate => {
+          const candidateLocal = vscode.Uri.joinPath(this.scope!, ...candidate.path.split('/'));
+          return transferManager.uploadFile(connection, candidateLocal.fsPath, `${remoteRoot}/${candidate.path}`, transferConfig, {
+            size: candidate.local?.size,
+            targetExists: Boolean(candidate.remote),
+            targetType: 'file'
+          });
+        }));
+        const completed = changedFiles.filter((_, index) => settled[index].status === 'fulfilled').map(candidate => candidate.path);
+        const failed = settled.length - completed.length;
+        if (failed) {
+          if (completed.length) await this.refreshAfterTransfer(completed);
+          throw new Error(`Uploaded ${completed.length} changed files; ${failed} failed.`);
+        }
+        transferredPaths = completed;
+      }
       else await transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
         size: record?.local?.size,
         targetExists: Boolean(record?.remote),
@@ -1068,8 +1114,26 @@ export class SettingsPanel implements vscode.Disposable {
     } else if (action === 'download' && direction === 'remote') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Downloading ${filePath}`, percentage: 0 });
       if (isDirectory) {
-        const result = await transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, transferConfig);
-        if (result.failed.length) throw new Error(`Downloaded ${result.downloaded.length} files; ${result.failed.length} failed. Check the ITFFTP output for details.`);
+        const changedFiles = this.getChangedSubtreeFiles(filePath, 'download');
+        if (!changedFiles.length) {
+          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files under ${filePath}`, percentage: 100 });
+          return;
+        }
+        const settled = await Promise.allSettled(changedFiles.map(candidate => {
+          const candidateLocal = vscode.Uri.joinPath(this.scope!, ...candidate.path.split('/'));
+          return transferManager.downloadFile(connection, `${remoteRoot}/${candidate.path}`, candidateLocal.fsPath, transferConfig, {
+            size: candidate.remote?.size,
+            targetExists: Boolean(candidate.local),
+            targetType: 'file'
+          });
+        }));
+        const completed = changedFiles.filter((_, index) => settled[index].status === 'fulfilled').map(candidate => candidate.path);
+        const failed = settled.length - completed.length;
+        if (failed) {
+          if (completed.length) await this.refreshAfterTransfer(completed);
+          throw new Error(`Downloaded ${completed.length} changed files; ${failed} failed.`);
+        }
+        transferredPaths = completed;
       } else await transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
         size: record?.remote?.size,
         targetExists: Boolean(record?.local),
@@ -1105,8 +1169,21 @@ export class SettingsPanel implements vscode.Disposable {
     const remoteDirectory = parentPath ? `${root}/${parentPath}` : root;
     this.diffDirectoryCache.delete(`${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`);
     logger.info(`ITFFTP diff ${action} completed: ${filePath}; refreshing paired comparison`);
-    await this.refreshAfterTransfer([filePath]);
+    await this.refreshAfterTransfer(transferredPaths || [filePath]);
     this.panel?.webview.postMessage({ type: 'diffActionComplete', action, direction, path: filePath });
+  }
+
+  private getChangedSubtreeFiles(folderPath: string, direction: 'upload' | 'download'): DiffRecord[] {
+    const prefix = `${folderPath.replace(/\/$/, '')}/`;
+    return [...this.latestDiffRecords.values()]
+      .filter(record => {
+        if (record.type !== 'file' || !record.path.startsWith(prefix)) return false;
+        if (direction === 'upload') {
+          return Boolean(record.local) && (record.status === 'modified' || record.status === 'missing-remote' || record.status === 'type-changed');
+        }
+        return Boolean(record.remote) && (record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed');
+      })
+      .sort((left, right) => left.path.localeCompare(right.path));
   }
 
   private async exportConnections(value: unknown, selectedOnly: boolean): Promise<void> {
