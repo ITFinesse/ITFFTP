@@ -8,7 +8,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { BaseConnection } from '../core/connection';
 import { FileEntry, ChecksumResult, SearchResult, FileInfo, FTPConfig, CompareItem, CompareTreeNode, CompareResult } from '../types';
-import { formatFileSize, formatDate, formatPermissions, calculateChecksum } from '../utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, formatFileSize, formatDate, formatPermissions, calculateChecksum, isPathIgnored } from '../utils/helpers';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 import { lookup as lookupMimeType } from 'mime-types';
@@ -477,34 +477,13 @@ export class WebMasterTools {
   // ==================== Folder Comparison ====================
 
   // Default ignore patterns for folder comparison
-  private static readonly DEFAULT_IGNORE_PATTERNS = [
-    '.git',
-    'node_modules',
-    '.DS_Store',
-    'Thumbs.db',
-    '.vscode',
-    '.idea',
-    '__pycache__',
-    '*.pyc',
-    '.env',
-    '.env.local'
-  ];
+  private static readonly DEFAULT_IGNORE_PATTERNS = [...DEFAULT_IGNORE_PATTERNS, '__pycache__', '*.pyc'];
 
   /**
    * Check if a path should be ignored based on patterns
    */
   private shouldIgnore(filePath: string, ignorePatterns: string[]): boolean {
-    const fileName = path.basename(filePath);
-    for (const pattern of ignorePatterns) {
-      if (pattern.startsWith('*.')) {
-        // Extension match
-        const ext = pattern.slice(1);
-        if (fileName.endsWith(ext)) return true;
-      } else if (filePath.includes(pattern) || fileName === pattern) {
-        return true;
-      }
-    }
-    return false;
+    return isPathIgnored(filePath, ignorePatterns);
   }
 
   /**

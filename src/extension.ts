@@ -17,7 +17,7 @@ import { logger } from './utils/logger';
 import { statusBar } from './utils/status-bar';
 import { registerCommands } from './commands';
 import { fileWatcherManager } from './core/file-watcher';
-import { matchesPattern } from './utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, isPathIgnored } from './utils/helpers';
 import { TransferQueueTreeProvider } from './providers/transfer-queue-tree';
 import { SettingsPanel } from './providers/settings-panel';
 import { DashboardLauncherProvider } from './providers/dashboard-launcher';
@@ -379,7 +379,7 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
   }
 
   const relativePath = path.relative(workspaceRoot, document.fileName);
-  if (config.ignore && matchesPattern(relativePath, config.ignore)) {
+  if (isPathIgnored(relativePath, [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])])) {
     return;
   }
 

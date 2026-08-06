@@ -12,7 +12,7 @@ import { configManager } from './config';
 import { connectionManager } from './connection-manager';
 import { transferManager } from './transfer-manager';
 import { logger } from '../utils/logger';
-import { normalizeRemotePath, matchesPattern } from '../utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, normalizeRemotePath, isPathIgnored } from '../utils/helpers';
 import { isWatcherWriteSuppressed } from './watcher-suppression';
 
 export class FileWatcher implements vscode.Disposable {
@@ -95,7 +95,7 @@ export class FileWatcher implements vscode.Disposable {
     const relativePath = path.relative(this.workspaceRoot, filePath);
 
     // Check ignore patterns
-    if (this.config.ignore && matchesPattern(relativePath, this.config.ignore)) {
+    if (isPathIgnored(relativePath, [...DEFAULT_IGNORE_PATTERNS, ...(this.config.ignore || [])])) {
       return;
     }
 

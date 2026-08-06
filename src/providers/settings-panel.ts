@@ -10,11 +10,11 @@ import { configManager } from '../core/config';
 import { transferManager } from '../core/transfer-manager';
 import { connectionManager } from '../core/connection-manager';
 import { AnalyticsStore } from '../core/analytics-store';
-import { classifyDiff, collapseRecursiveTransfers, newerSide } from '../core/diff-comparison';
+import { classifyDiff, newerSide } from '../core/diff-comparison';
 import { BaseConnection } from '../core/connection';
 import { isConnectionClosedError } from '../core/connection-errors';
 import { FTPConfig } from '../types';
-import { matchesPattern } from '../utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, isPathIgnored } from '../utils/helpers';
 
 type SettingsSavedHandler = (scope: vscode.Uri) => Promise<void> | void;
 
@@ -33,20 +33,6 @@ type DiffRecord = {
   status: 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
   newer?: 'local' | 'remote';
 };
-
-const DEFAULT_IGNORE_PATTERNS = [
-  '.git',
-  '.vscode',
-  '.idea',
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.env',
-  '.env.*',
-  '.DS_Store',
-  'Thumbs.db'
-];
 
 const SETTING_KEYS = [
   'autoConnect',
@@ -93,7 +79,7 @@ export class SettingsPanel implements vscode.Disposable {
   private readonly diffDirectoryCache = new Map<string, DiffEntry[]>();
   private readonly latestDiffRecords = new Map<string, DiffRecord>();
   private localWatcher?: vscode.FileSystemWatcher;
-  private localRefreshTimer?: NodeJS.Timeout;
+  private readonly localRefreshTimers = new Map<string, NodeJS.Timeout>();
   private cacheWriteTimer?: NodeJS.Timeout;
   private backgroundRefreshTimer?: NodeJS.Timeout;
   private lastBackgroundRefreshAt = 0;
@@ -196,7 +182,8 @@ export class SettingsPanel implements vscode.Disposable {
 
   public dispose(): void {
     this.localWatcher?.dispose();
-    if (this.localRefreshTimer) clearTimeout(this.localRefreshTimer);
+    for (const timer of this.localRefreshTimers.values()) clearTimeout(timer);
+    this.localRefreshTimers.clear();
     if (this.cacheWriteTimer) clearTimeout(this.cacheWriteTimer);
     if (this.backgroundRefreshTimer) clearTimeout(this.backgroundRefreshTimer);
     if (this.transferQueueExpiryTimer) clearTimeout(this.transferQueueExpiryTimer);
@@ -244,15 +231,17 @@ export class SettingsPanel implements vscode.Disposable {
       const activeConfig = configs.find(candidate => candidate.default) || configs[0];
       if (!relativePath || this.isIgnoredDiffPath(relativePath, [...DEFAULT_IGNORE_PATTERNS, ...(activeConfig?.ignore || [])])) return;
       this.localDirtyPaths.add(relativePath);
-      if (this.localRefreshTimer) clearTimeout(this.localRefreshTimer);
-      this.localRefreshTimer = setTimeout(() => {
-        this.localRefreshTimer = undefined;
+      const pendingTimer = this.localRefreshTimers.get(relativePath);
+      if (pendingTimer) clearTimeout(pendingTimer);
+      const timer = setTimeout(() => {
+        this.localRefreshTimers.delete(relativePath);
         const currentConfigs = configManager.getConfigs(this.scope!.fsPath);
         const config = currentConfigs.find(candidate => candidate.default) || currentConfigs[0];
         if (!config) return;
         logger.info(`ITFFTP local change detected; updating cached comparison`);
         void this.refreshLocalCacheEntry(uri, config);
       }, 450);
+      this.localRefreshTimers.set(relativePath, timer);
     };
     this.localWatcher.onDidCreate(changed);
     this.localWatcher.onDidChange(changed);
@@ -679,7 +668,11 @@ export class SettingsPanel implements vscode.Disposable {
       }
       return record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed';
     });
-    const candidates = collapseRecursiveTransfers(rawCandidates);
+    // The paired comparison already contains every changed descendant. Queue
+    // files directly so a changed directory cannot trigger a full recursive
+    // transfer of otherwise identical or ignored content.
+    const candidates = rawCandidates.filter(record => record.type === 'file'
+      && !this.isIgnoredDiffPath(record.path, config.ignore || []));
 
     if (candidates.length === 0) {
       statusBar.info(`No changed files to sync ${direction === 'up' ? 'up' : 'down'}.`);
@@ -698,31 +691,23 @@ export class SettingsPanel implements vscode.Disposable {
       const localUri = vscode.Uri.joinPath(this.scope, ...segments);
       const remotePath = `${remoteRoot}/${filePath}`;
       if (direction === 'up' && candidate.local) {
-        if (candidate.type === 'directory') {
-          actions.push({ path: filePath, promise: transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, transferConfig) });
-        } else {
-          actions.push({
-            path: filePath,
-            promise: transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
-              size: candidate.local.size,
-              targetExists: Boolean(candidate.remote),
-              targetType: 'file'
-            })
-          });
-        }
+        actions.push({
+          path: filePath,
+          promise: transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
+            size: candidate.local.size,
+            targetExists: Boolean(candidate.remote),
+            targetType: 'file'
+          })
+        });
       } else if (direction === 'down' && candidate.remote) {
-        if (candidate.type === 'directory') {
-          actions.push({ path: filePath, promise: transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, transferConfig) });
-        } else {
-          actions.push({
-            path: filePath,
-            promise: transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
-              size: candidate.remote.size,
-              targetExists: Boolean(candidate.local),
-              targetType: 'file'
-            })
-          });
-        }
+        actions.push({
+          path: filePath,
+          promise: transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
+            size: candidate.remote.size,
+            targetExists: Boolean(candidate.local),
+            targetType: 'file'
+          })
+        });
       } else {
         continue;
       }
@@ -1261,7 +1246,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async getWorkspaceFiles(ignorePatterns: string[] = DEFAULT_IGNORE_PATTERNS): Promise<string[]> {
+  private async getWorkspaceFiles(ignorePatterns: readonly string[] = DEFAULT_IGNORE_PATTERNS): Promise<string[]> {
     if (!this.scope) return [];
 
     const files: string[] = [];
@@ -1294,21 +1279,8 @@ export class SettingsPanel implements vscode.Disposable {
     return files.sort((left, right) => left.localeCompare(right));
   }
 
-  private isIgnoredDiffPath(relativePath: string, patterns: string[]): boolean {
-    const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-    if (!normalized) return false;
-    const basename = normalized.split('/').pop() || normalized;
-    return patterns.some(pattern => {
-      const clean = String(pattern || '').replace(/^\/+|\/+$/g, '');
-      if (!clean) return false;
-      if (matchesPattern(normalized, [clean]) || matchesPattern(basename, [clean])) return true;
-      if (!/[?*]/.test(clean) && normalized.split('/').includes(clean)) return true;
-      if (clean.endsWith('/**')) {
-        const prefix = clean.slice(0, -3);
-        return normalized === prefix || normalized.startsWith(`${prefix}/`);
-      }
-      return false;
-    });
+  private isIgnoredDiffPath(relativePath: string, patterns: readonly string[]): boolean {
+    return isPathIgnored(relativePath, patterns);
   }
 
   private async getWorkspaceFileStats(

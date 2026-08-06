@@ -7,6 +7,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { FilePermissions, FileEntry } from '../types';
 
+export const DEFAULT_IGNORE_PATTERNS = [
+  '.git', '.vscode', '.idea', 'node_modules', 'dist', 'build', 'coverage',
+  '.env', '.env.*', '.DS_Store', 'Thumbs.db'
+] as const;
+
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -157,7 +162,25 @@ export function getRelativePath(from: string, to: string): string {
   return result.join('/') || '.';
 }
 
-export function matchesPattern(filePath: string, patterns: string[]): boolean {
+const patternRegexCache = new Map<string, RegExp>();
+
+function regexForPattern(pattern: string): RegExp {
+  const cached = patternRegexCache.get(pattern);
+  if (cached) return cached;
+  const regex = new RegExp(
+    '^' + pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '___DOUBLESTAR___')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '.')
+      .replace(/___DOUBLESTAR___/g, '.*') + '$'
+  );
+  if (patternRegexCache.size >= 512) patternRegexCache.clear();
+  patternRegexCache.set(pattern, regex);
+  return regex;
+}
+
+export function matchesPattern(filePath: string, patterns: readonly string[]): boolean {
   // Ensure patterns is an array to prevent iteration errors on strings/objects
   const patternList = Array.isArray(patterns) ? patterns : [patterns].filter(p => typeof p === 'string');
   const normalizedPath = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
@@ -169,17 +192,28 @@ export function matchesPattern(filePath: string, patterns: string[]): boolean {
       const segments = normalizedPath.split('/');
       if (normalizedPath === pattern || normalizedPath.startsWith(`${pattern}/`) || segments.includes(pattern)) return true;
     }
-    const regex = new RegExp(
-      '^' + pattern
-        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-        .replace(/\*\*/g, '___DOUBLESTAR___')
-        .replace(/\*/g, '[^/]*')
-        .replace(/\?/g, '.')
-        .replace(/___DOUBLESTAR___/g, '.*') + '$'
-    );
+    const regex = regexForPattern(pattern);
     if (regex.test(normalizedPath)) return true;
   }
   return false;
+}
+
+/** Match an ignored path consistently across Windows/local and POSIX/remote paths. */
+export function isPathIgnored(filePath: string, patterns: readonly string[] | undefined): boolean {
+  if (!patterns?.length) return false;
+  const normalized = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
+  if (!normalized) return false;
+  const basename = normalized.split('/').pop() || normalized;
+  return patterns.some(rawPattern => {
+    const pattern = String(rawPattern || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
+    if (!pattern) return false;
+    if (matchesPattern(normalized, [pattern]) || matchesPattern(basename, [pattern])) return true;
+    if (pattern.endsWith('/**')) {
+      const directory = pattern.slice(0, -3).replace(/\/+$/g, '');
+      return normalized === directory || normalized.startsWith(`${directory}/`);
+    }
+    return false;
+  });
 }
 
 export function getFileIcon(fileName: string, isDirectory: boolean): string {

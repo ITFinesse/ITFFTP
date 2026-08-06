@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeRemotePath, sanitizeRelativePath, matchesPattern, formatFileSize } from '../src/utils/helpers';
+import { normalizeRemotePath, sanitizeRelativePath, matchesPattern, isPathIgnored, formatFileSize } from '../src/utils/helpers';
 
 describe('helpers', () => {
   it('normalizeRemotePath collapses slashes and backslashes', () => {
@@ -24,6 +24,15 @@ describe('helpers', () => {
     expect(matchesPattern('storage\\logs\\app.log', ['storage/logs/**'])).toBe(true);
     expect(matchesPattern('node_modules\\package\\index.js', ['node_modules'])).toBe(true);
     expect(matchesPattern('src\\index.ts', ['storage/logs/**', 'node_modules'])).toBe(false);
+  });
+
+  it('fully ignores a directory, its contents, and matching basenames', () => {
+    const patterns = ['storage/logs/**', '.env*', 'node_modules'];
+    expect(isPathIgnored('storage/logs', patterns)).toBe(true);
+    expect(isPathIgnored('storage/logs/archive/old.log', patterns)).toBe(true);
+    expect(isPathIgnored('packages/app/node_modules/lib/index.js', patterns)).toBe(true);
+    expect(isPathIgnored('config/.env.local', patterns)).toBe(true);
+    expect(isPathIgnored('storage/uploads/image.png', patterns)).toBe(false);
   });
 
   it('formatFileSize formats bytes', () => {

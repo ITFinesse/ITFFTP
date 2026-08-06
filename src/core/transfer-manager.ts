@@ -10,7 +10,7 @@ import { connectionManager } from './connection-manager';
 import { TransferItem, SyncResult, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { generateId, normalizeRemotePath, matchesPattern } from '../utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, generateId, normalizeRemotePath, isPathIgnored } from '../utils/helpers';
 import { EventEmitter } from 'stream';
 import { suppressWatcherWrite } from './watcher-suppression';
 
@@ -555,7 +555,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     };
 
     statusBar.info(`Scanning local files: ${path.basename(localPath)}...`);
-    const files = await this.getLocalFiles(localPath);
+    const ignorePatterns = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
+    const files = await this.getLocalFiles(localPath, ignorePatterns);
     if (files.length === 0) {
       statusBar.info('No files found to upload');
       return result;
@@ -570,7 +571,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       const relativePath = path.relative(localPath, file);
       const remoteFilePath = normalizeRemotePath(path.join(remotePath, relativePath));
 
-      if (config.ignore && matchesPattern(relativePath, config.ignore)) {
+      if (isPathIgnored(relativePath, ignorePatterns)) {
         result.skipped.push(relativePath);
         return;
       }
@@ -607,7 +608,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     };
 
     statusBar.info(`Scanning remote files: ${path.basename(remotePath)}...`);
-    const files = await this.getRemoteFiles(connection, remotePath);
+    const ignorePatterns = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
+    const files = await this.getRemoteFiles(connection, remotePath, ignorePatterns);
     if (files.length === 0) {
       statusBar.info('No files found to download');
       return result;
@@ -638,7 +640,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       const relativePath = path.relative(remotePath, file.path);
       const localFilePath = path.join(localPath, relativePath);
 
-      if (config.ignore && matchesPattern(relativePath, config.ignore)) {
+      if (isPathIgnored(relativePath, ignorePatterns)) {
         result.skipped.push(relativePath);
         return;
       }
@@ -699,7 +701,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     };
   }
 
-  private async getLocalFiles(dir: string): Promise<string[]> {
+  private async getLocalFiles(dir: string, ignorePatterns?: string[]): Promise<string[]> {
     const files: string[] = [];
     const MAX_FILES = 100000;
     const MAX_DEPTH = 50;
@@ -713,6 +715,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       for (const entry of entries) {
         if (files.length >= MAX_FILES) break;
         const fullPath = path.join(currentDir, entry.name);
+        const relativePath = path.relative(dir, fullPath);
+        if (isPathIgnored(relativePath, ignorePatterns)) continue;
 
         if (entry.isDirectory()) {
           subdirs.push(fullPath);
@@ -732,10 +736,11 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     return files;
   }
 
-  private async getRemoteFiles(connection: BaseConnection, remotePath: string): Promise<any[]> {
+  private async getRemoteFiles(connection: BaseConnection, remotePath: string, ignorePatterns?: string[]): Promise<any[]> {
     const files: any[] = [];
     const MAX_FILES = 100000;
     const MAX_DEPTH = 50;
+    const normalizedRoot = normalizeRemotePath(remotePath).replace(/\/+$/g, '');
 
     const traverse = async (currentPath: string, depth: number) => {
       if (depth > MAX_DEPTH || files.length >= MAX_FILES) return;
@@ -746,6 +751,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       for (const entry of entries) {
         if (files.length >= MAX_FILES) break;
         const fullPath = normalizeRemotePath(path.join(currentPath, entry.name));
+        const relativePath = fullPath.startsWith(`${normalizedRoot}/`) ? fullPath.slice(normalizedRoot.length + 1) : entry.name;
+        if (isPathIgnored(relativePath, ignorePatterns)) continue;
 
         if (entry.type === 'directory') {
           files.push({ ...entry, path: fullPath });
