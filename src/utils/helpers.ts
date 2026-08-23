@@ -12,8 +12,23 @@ export const DEFAULT_IGNORE_PATTERNS = [
   '.env', '.env.*', '.DS_Store', 'Thumbs.db'
 ] as const;
 
+export function resolveLocalRoot(workspaceRoot: string, configuredPath?: string): string {
+  const relative = String(configuredPath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!relative || relative === '.') {return path.resolve(workspaceRoot);}
+  if (relative.split('/').some(segment => segment === '..')) {
+    throw new Error('Local folder must stay inside the workspace.');
+  }
+  const root = path.resolve(workspaceRoot);
+  const resolved = path.resolve(root, ...relative.split('/').filter(Boolean));
+  const relation = path.relative(root, resolved);
+  if (relation === '..' || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
+    throw new Error('Local folder must stay inside the workspace.');
+  }
+  return resolved;
+}
+
 export function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
+  if (bytes === 0) {return '0 B';}
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const k = 1024;
   const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -26,8 +41,8 @@ export function formatDate(date: Date | string | number): string {
 }
 
 export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 1000) {return `${ms}ms`;}
+  if (ms < 60000) {return `${(ms / 1000).toFixed(1)}s`;}
   const minutes = Math.floor(ms / 60000);
   const seconds = ((ms % 60000) / 1000).toFixed(0);
   return `${minutes}m ${seconds}s`;
@@ -65,7 +80,7 @@ export function formatPermissions(perm: FilePermissions | number): string {
     const bit = (mode >> i) & 1;
     const charIndex = 2 - (i % 3);
     result += bit ? chars[charIndex] : '-';
-    if (i % 3 === 0 && i > 0) result += '';
+    if (i % 3 === 0 && i > 0) {result += '';}
   }
 
   return result;
@@ -166,7 +181,7 @@ const patternRegexCache = new Map<string, RegExp>();
 
 function regexForPattern(pattern: string): RegExp {
   const cached = patternRegexCache.get(pattern);
-  if (cached) return cached;
+  if (cached) {return cached;}
   const regex = new RegExp(
     '^' + pattern
       .replace(/[.+^${}()|[\]\\]/g, '\\$&')
@@ -175,7 +190,7 @@ function regexForPattern(pattern: string): RegExp {
       .replace(/\?/g, '.')
       .replace(/___DOUBLESTAR___/g, '.*') + '$'
   );
-  if (patternRegexCache.size >= 512) patternRegexCache.clear();
+  if (patternRegexCache.size >= 512) {patternRegexCache.clear();}
   patternRegexCache.set(pattern, regex);
   return regex;
 }
@@ -187,27 +202,27 @@ export function matchesPattern(filePath: string, patterns: readonly string[]): b
 
   for (const rawPattern of patternList) {
     const pattern = String(rawPattern || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
-    if (!pattern) continue;
+    if (!pattern) {continue;}
     if (!/[?*]/.test(pattern)) {
       const segments = normalizedPath.split('/');
-      if (normalizedPath === pattern || normalizedPath.startsWith(`${pattern}/`) || segments.includes(pattern)) return true;
+      if (normalizedPath === pattern || normalizedPath.startsWith(`${pattern}/`) || segments.includes(pattern)) {return true;}
     }
     const regex = regexForPattern(pattern);
-    if (regex.test(normalizedPath)) return true;
+    if (regex.test(normalizedPath)) {return true;}
   }
   return false;
 }
 
 /** Match an ignored path consistently across Windows/local and POSIX/remote paths. */
 export function isPathIgnored(filePath: string, patterns: readonly string[] | undefined): boolean {
-  if (!patterns?.length) return false;
+  if (!patterns?.length) {return false;}
   const normalized = String(filePath || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
-  if (!normalized) return false;
+  if (!normalized) {return false;}
   const basename = normalized.split('/').pop() || normalized;
   return patterns.some(rawPattern => {
     const pattern = String(rawPattern || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '');
-    if (!pattern) return false;
-    if (matchesPattern(normalized, [pattern]) || matchesPattern(basename, [pattern])) return true;
+    if (!pattern) {return false;}
+    if (matchesPattern(normalized, [pattern]) || matchesPattern(basename, [pattern])) {return true;}
     if (pattern.endsWith('/**')) {
       const directory = pattern.slice(0, -3).replace(/\/+$/g, '');
       return normalized === directory || normalized.startsWith(`${directory}/`);
@@ -217,7 +232,7 @@ export function isPathIgnored(filePath: string, patterns: readonly string[] | un
 }
 
 export function getFileIcon(fileName: string, isDirectory: boolean): string {
-  if (isDirectory) return '$(folder)';
+  if (isDirectory) {return '$(folder)';}
 
   const ext = path.extname(fileName).toLowerCase();
   const iconMap: { [key: string]: string } = {
@@ -276,8 +291,8 @@ export function getFileIcon(fileName: string, isDirectory: boolean): string {
 export function sortFileEntries(entries: FileEntry[]): FileEntry[] {
   return entries.sort((a, b) => {
     // Directories first
-    if (a.type === 'directory' && b.type !== 'directory') return -1;
-    if (a.type !== 'directory' && b.type === 'directory') return 1;
+    if (a.type === 'directory' && b.type !== 'directory') {return -1;}
+    if (a.type !== 'directory' && b.type === 'directory') {return 1;}
     // Then alphabetical
     return a.name.localeCompare(b.name);
   });
@@ -288,7 +303,7 @@ export function generateId(): string {
 }
 
 export function truncate(str: string, maxLength: number): string {
-  if (str.length <= maxLength) return str;
+  if (str.length <= maxLength) {return str;}
   return str.substring(0, maxLength - 3) + '...';
 }
 
@@ -363,7 +378,7 @@ export function isBinaryFile(filePath: string): boolean {
 
   // Explicitly allow common text-based programming languages even if they have weird chars
   const textExtensions = new Set(['.php', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yml', '.yaml', '.txt', '.md', '.sql', '.sh', '.py', '.rb']);
-  if (textExtensions.has(ext)) return false;
+  if (textExtensions.has(ext)) {return false;}
 
   return BINARY_EXTENSIONS.has(ext);
 }

@@ -44,9 +44,7 @@
     "pearai"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:stackerftp.openSettings",
-    "onCommand:stackerftp.connect"
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -96,7 +94,7 @@
         "stackerftp.enableFileWatcher": {
           "type": "boolean",
           "default": false,
-          "description": "Watch local files for changes"
+          "description": "Watch local and remote files for changes and run enabled Auto Sync directions after a one-second quiet period"
         },
         "stackerftp.autoReconnect": {
           "type": "boolean",
@@ -1063,8 +1061,8 @@
     "watch": "tsc -watch -p ./",
     "bundle": "node esbuild.js --minify",
     "bundle:dev": "node esbuild.js",
-    "lint": "eslint src --ext ts",
-    "test": "vitest",
+    "lint": "eslint src --ext ts --no-eslintrc --config .eslintrc.json",
+    "test": "node scripts/run-tests.js",
     "package": "vsce package"
   },
   "devDependencies": {

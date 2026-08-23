@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Client, SFTPWrapper } from 'ssh2';
 import { BaseConnection } from './connection';
-import { FileEntry, FTPConfig } from '../types';
+import { FileEntry } from '../types';
 import { logger } from '../utils/logger';
 import { normalizeRemotePath } from '../utils/helpers';
 import { connectionHopping } from './connection-hopping';
@@ -239,7 +239,7 @@ export class SFTPConnection extends BaseConnection {
         throw new Error(`Cannot download to ${localPath}: a directory exists at this path.`);
       }
     } catch (e: any) {
-      if (e.code !== 'ENOENT') throw e;
+      if (e.code !== 'ENOENT') {throw e;}
     }
 
     return new Promise((resolve, reject) => {
@@ -250,7 +250,7 @@ export class SFTPConnection extends BaseConnection {
           this.emitProgress(remotePath, transferred, 0);
         }
       }, (err) => {
-        if (err) reject(err);
+        if (err) {reject(err);}
         else {
           this.emit('transferComplete', { direction: 'download', remotePath, localPath });
           resolve();
@@ -317,11 +317,11 @@ export class SFTPConnection extends BaseConnection {
   }
 
   async setModifyTime(remotePath: string, modifyTime: Date): Promise<boolean> {
-    if (!this.sftp) return false;
+    if (!this.sftp) {return false;}
     const seconds = Math.floor(modifyTime.getTime() / 1000);
     return new Promise(resolve => {
       this.sftp!.utimes(remotePath, seconds, seconds, error => {
-        if (error) logger.debug(`SFTP server did not preserve timestamp for ${remotePath}`, error);
+        if (error) {logger.debug(`SFTP server did not preserve timestamp for ${remotePath}`, error);}
         resolve(!error);
       });
     });
@@ -339,8 +339,8 @@ export class SFTPConnection extends BaseConnection {
       }
 
       this.sftp.unlink(remotePath, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }
@@ -456,8 +456,8 @@ export class SFTPConnection extends BaseConnection {
 
     return new Promise((resolve, reject) => {
       this.sftp!.rmdir(remotePath, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }
@@ -465,7 +465,7 @@ export class SFTPConnection extends BaseConnection {
   // Execute SSH command for fast operations
   private escapeShellArg(arg: string): string {
     // Escape special shell characters
-    if (!/^[a-zA-Z0-9_\-\/.:@]+$/.test(arg)) {
+    if (!/^[a-zA-Z0-9_\-/.:@]+$/.test(arg)) {
       // Use single quotes and escape single quotes properly
       return "'" + arg.replace(/'/g, "'\"'\"'") + "'";
     }
@@ -537,8 +537,8 @@ export class SFTPConnection extends BaseConnection {
     // Finally remove the empty directory
     return new Promise((resolve, reject) => {
       this.sftp!.rmdir(remotePath, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }
@@ -547,26 +547,18 @@ export class SFTPConnection extends BaseConnection {
     return this.enqueue(() => this._rename(oldPath, newPath));
   }
 
-  private _rename(oldPath: string, newPath: string): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      if (!this.sftp) {
-        reject(new Error('Not connected'));
-        return;
-      }
+  private async _rename(oldPath: string, newPath: string): Promise<void> {
+    if (!this.sftp) {throw new Error('Not connected');}
 
-      const parentDir = path.dirname(newPath);
-      if (parentDir && parentDir !== '.' && parentDir !== '/') {
-        try {
-          await this._ensureDir(parentDir);
-        } catch (dirErr) {
-          reject(dirErr);
-          return;
-        }
-      }
+    const parentDir = path.dirname(newPath);
+    if (parentDir && parentDir !== '.' && parentDir !== '/') {
+      await this._ensureDir(parentDir);
+    }
 
-      this.sftp.rename(oldPath, newPath, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+    await new Promise<void>((resolve, reject) => {
+      this.sftp!.rename(oldPath, newPath, (err: any) => {
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }
@@ -635,8 +627,8 @@ export class SFTPConnection extends BaseConnection {
       const modeNum = typeof mode === 'string' ? parseInt(mode, 8) : mode;
 
       this.sftp.chmod(remotePath, modeNum, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }
@@ -653,8 +645,8 @@ export class SFTPConnection extends BaseConnection {
       }
 
       this.sftp.readFile(remotePath, (err: any, data: Buffer) => {
-        if (err) reject(err);
-        else resolve(data);
+        if (err) {reject(err);}
+        else {resolve(data);}
       });
     });
   }
@@ -663,29 +655,19 @@ export class SFTPConnection extends BaseConnection {
     return this.enqueue(() => this._writeFile(remotePath, content));
   }
 
-  private _writeFile(remotePath: string, content: Buffer | string): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      if (!this.sftp) {
-        reject(new Error('Not connected'));
-        return;
-      }
+  private async _writeFile(remotePath: string, content: Buffer | string): Promise<void> {
+    if (!this.sftp) {throw new Error('Not connected');}
 
-      // Ensure parent directory exists
-      const parentDir = path.dirname(remotePath);
-      if (parentDir && parentDir !== '.' && parentDir !== '/') {
-        try {
-          await this._ensureDir(parentDir);
-        } catch (dirErr) {
-          reject(dirErr);
-          return;
-        }
-      }
+    const parentDir = path.dirname(remotePath);
+    if (parentDir && parentDir !== '.' && parentDir !== '/') {
+      await this._ensureDir(parentDir);
+    }
 
-      const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
-
-      this.sftp.writeFile(remotePath, buffer, (err: any) => {
-        if (err) reject(err);
-        else resolve();
+    const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
+    await new Promise<void>((resolve, reject) => {
+      this.sftp!.writeFile(remotePath, buffer, (err: any) => {
+        if (err) {reject(err);}
+        else {resolve();}
       });
     });
   }

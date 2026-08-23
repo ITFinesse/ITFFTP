@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { exec } from 'child_process';
 import { logger } from '../utils/logger';
 
 export interface GitChangedFile {
@@ -131,8 +132,6 @@ export class GitIntegration {
    */
   private async getChangedFilesFromCLI(): Promise<GitChangedFile[]> {
     return new Promise((resolve) => {
-      const { exec } = require('child_process');
-
       exec(
         'git status --porcelain',
         { cwd: this.workspaceRoot },

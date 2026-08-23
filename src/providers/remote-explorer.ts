@@ -3,7 +3,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { RemoteFileItem, RemoteConfigItem, RemoteMessageItem } from './remote-file';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
@@ -158,7 +157,7 @@ export class RemoteExplorerProvider implements vscode.TreeDataProvider<RemoteFil
     const config = configManager.getConfigs(this.workspaceRoot).find(
       c => (c.name || c.host) === item.configName
     );
-    if (!config) return undefined;
+    if (!config) {return undefined;}
     return this.connections.get(`${config.host}:${config.port}`);
   }
 

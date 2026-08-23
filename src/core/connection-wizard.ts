@@ -6,8 +6,7 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import { FTPConfig, Protocol, HopConfig } from '../types';
+import { FTPConfig, Protocol } from '../types';
 import { configManager } from './config';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
@@ -80,7 +79,7 @@ export class ConnectionWizard {
       ignoreFocusOut: true
     });
 
-    if (!selected) return false;
+    if (!selected) {return false;}
 
     this.config.protocol = selected.protocol;
     this.config.port = selected.defaultPort;
@@ -103,7 +102,7 @@ export class ConnectionWizard {
       }
     });
 
-    if (!name) return false;
+    if (!name) {return false;}
     this.config.name = name.trim();
     return true;
   }
@@ -122,7 +121,7 @@ export class ConnectionWizard {
       }
     });
 
-    if (!host) return false;
+    if (!host) {return false;}
     this.config.host = host.trim();
     return true;
   }
@@ -136,7 +135,7 @@ export class ConnectionWizard {
       prompt: `Enter the port number (default: ${defaultPort})`,
       ignoreFocusOut: true,
       validateInput: (value) => {
-        if (!value) return null; // Use default
+        if (!value) {return null;} // Use default
         const num = parseInt(value);
         if (isNaN(num) || num < 1 || num > 65535) {
           return 'Please enter a valid port number (1-65535)';
@@ -145,7 +144,7 @@ export class ConnectionWizard {
       }
     });
 
-    if (port === undefined) return false;
+    if (port === undefined) {return false;}
     this.config.port = port ? parseInt(port) : defaultPort;
     return true;
   }
@@ -164,7 +163,7 @@ export class ConnectionWizard {
       }
     });
 
-    if (!username) return false;
+    if (!username) {return false;}
     this.config.username = username.trim();
     return true;
   }
@@ -194,7 +193,7 @@ export class ConnectionWizard {
       ignoreFocusOut: true
     });
 
-    if (!selected) return false;
+    if (!selected) {return false;}
 
     if (selected.type === 'password') {
       const password = await vscode.window.showInputBox({
@@ -220,7 +219,7 @@ export class ConnectionWizard {
         }
       });
 
-      if (!keyPath || keyPath.length === 0) return false;
+      if (!keyPath || keyPath.length === 0) {return false;}
 
       this.config.privateKeyPath = keyPath[0].fsPath;
 
@@ -274,7 +273,7 @@ export class ConnectionWizard {
       }
     });
 
-    if (!remotePath) return false;
+    if (!remotePath) {return false;}
     this.config.remotePath = remotePath.trim();
     return true;
   }
@@ -312,7 +311,7 @@ export class ConnectionWizard {
       ignoreFocusOut: true
     });
 
-    if (selected === undefined) return false;
+    if (selected === undefined) {return false;}
 
     // Apply selected options
     for (const option of selected) {
@@ -392,7 +391,7 @@ export class ConnectionWizard {
       }
     );
 
-    if (!selectedConfig) return;
+    if (!selectedConfig) {return;}
 
     // Select new protocol
     const protocols: { label: string; protocol: Protocol; port: number }[] = [

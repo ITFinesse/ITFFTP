@@ -13,7 +13,7 @@ import { BaseConnection } from '../core/connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { formatFileSize, formatDate, normalizeRemotePath } from '../utils/helpers';
+import { formatFileSize, formatDate, normalizeRemotePath, resolveLocalRoot } from '../utils/helpers';
 import * as fs from 'fs';
 
 export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider {
@@ -37,7 +37,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
-    context: vscode.WebviewViewResolveContext,
+    _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
@@ -121,7 +121,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _checkConnectionStatus() {
-    if (!this._view) return;
+    if (!this._view) {return;}
 
     const workspaceRoot = this._getWorkspaceRoot();
     if (!workspaceRoot) {
@@ -177,7 +177,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   public async connectToConfig(config: FTPConfig) {
-    if (!this._view || !config) return;
+    if (!this._view || !config) {return;}
 
     this._currentConfig = config;
 
@@ -215,7 +215,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _sendConfigs() {
-    if (!this._view) return;
+    if (!this._view) {return;}
 
     const workspaceRoot = this._getWorkspaceRoot();
     if (!workspaceRoot) {
@@ -237,13 +237,13 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleConnect(configIndex: number) {
-    if (!this._view) return;
+    if (!this._view) {return;}
 
     const workspaceRoot = this._getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
-    if (configIndex >= configs.length) return;
+    if (configIndex >= configs.length) {return;}
 
     this._currentConfig = configs[configIndex];
 
@@ -282,7 +282,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleListDirectory(dirPath: string) {
-    if (!this._connection || !this._view) return;
+    if (!this._connection || !this._view) {return;}
 
     try {
       this._view.webview.postMessage({ type: 'loading' });
@@ -337,7 +337,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleNavigateUp() {
-    if (!this._currentPath) return;
+    if (!this._currentPath) {return;}
     const parentPath = normalizeRemotePath(path.dirname(this._currentPath));
     if (parentPath && parentPath !== this._currentPath) {
       await this._handleListDirectory(parentPath);
@@ -351,7 +351,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handlePreview(filePath: string, fileName: string) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     try {
       const ext = path.extname(fileName).toLowerCase();
@@ -401,14 +401,14 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleDownload(remotePath: string, isDirectory?: boolean) {
-    if (!this._connection || !this._currentConfig) return;
+    if (!this._connection || !this._currentConfig) {return;}
 
     const workspaceRoot = this._getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     try {
       const relativePath = path.relative(this._currentConfig.remotePath, remotePath);
-      const localPath = path.join(workspaceRoot, relativePath);
+      const localPath = path.join(resolveLocalRoot(workspaceRoot, this._currentConfig.localPath), relativePath);
 
       if (isDirectory) {
         const result = await transferManager.downloadDirectory(this._connection, remotePath, localPath, this._currentConfig);
@@ -426,7 +426,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleDelete(filePath: string, isDirectory: boolean) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     const confirm = await vscode.window.showWarningMessage(
       `Delete ${path.basename(filePath)}?`,
@@ -434,7 +434,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       'Delete', 'Cancel'
     );
 
-    if (confirm !== 'Delete') return;
+    if (confirm !== 'Delete') {return;}
 
     try {
       if (isDirectory) {
@@ -449,7 +449,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleMkdir(name: string) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     try {
       const newPath = normalizeRemotePath(path.join(this._currentPath, name));
@@ -461,7 +461,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleRename(oldPath: string, newName: string) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     try {
       const newPath = normalizeRemotePath(path.join(path.dirname(oldPath), newName));
@@ -473,7 +473,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleChmod(filePath: string, mode: string) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     try {
       await this._connection.chmod(filePath, parseInt(mode, 8));
@@ -484,7 +484,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleDuplicate(filePath: string, fileName: string) {
-    if (!this._connection) return;
+    if (!this._connection) {return;}
 
     try {
       const content = await this._connection.readFile(filePath);
@@ -604,7 +604,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   }
 
   private async _handleUploadFiles(files: { name: string, content: string }[]) {
-    if (!this._connection || !this._currentConfig) return;
+    if (!this._connection || !this._currentConfig) {return;}
 
     try {
       for (const file of files) {
@@ -623,11 +623,11 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
     await vscode.window.showTextDocument(doc);
   }
 
-  private async _openFileInEditor(filePath: string, fileName: string) {
-    if (!this._connection || !this._currentConfig) return;
+  private async _openFileInEditor(filePath: string, _fileName: string) {
+    if (!this._connection || !this._currentConfig) {return;}
 
     const workspaceRoot = this._getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     try {
       // Show inline loading state on the specific file
@@ -635,7 +635,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
       // Calculate local path (mirror remote structure in workspace)
       const relativePath = path.relative(this._currentConfig.remotePath, filePath);
-      const localPath = path.join(workspaceRoot, relativePath);
+      const localPath = path.join(resolveLocalRoot(workspaceRoot, this._currentConfig.localPath), relativePath);
       const localDir = path.dirname(localPath);
 
       // Ensure local directory exists

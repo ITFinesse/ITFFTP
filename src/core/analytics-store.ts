@@ -39,10 +39,10 @@ export class AnalyticsStore extends EventEmitter implements vscode.Disposable {
   }
 
   public async record(item: TransferItem): Promise<void> {
-    if (item.status !== 'completed' || !item.endTime) return;
+    if (item.status !== 'completed' || !item.endTime) {return;}
     await this.ready;
     const folder = this.findWorkspace(item.localPath);
-    if (!folder) return;
+    if (!folder) {return;}
     const id = folder.uri.toString();
     let project = this.data.projects.find(candidate => candidate.id === id);
     if (!project) {
@@ -55,7 +55,7 @@ export class AnalyticsStore extends EventEmitter implements vscode.Disposable {
       size: Math.max(0, item.size || item.transferred || 0),
       durationMs: item.startTime ? Math.max(0, item.endTime.getTime() - item.startTime.getTime()) : 0
     });
-    if (project.records.length > 1000) project.records.splice(0, project.records.length - 1000);
+    if (project.records.length > 1000) {project.records.splice(0, project.records.length - 1000);}
     await this.persist();
     this.emit('changed');
   }
@@ -72,7 +72,7 @@ export class AnalyticsStore extends EventEmitter implements vscode.Disposable {
     let uploadedFiles = 0, downloadedFiles = 0, uploadedBytes = 0, downloadedBytes = 0, totalDurationMs = 0;
     for (const record of selected.flatMap(project => project.records)) {
       const day = byDate.get(record.completedAt.slice(0, 10));
-      if (!day) continue;
+      if (!day) {continue;}
       totalDurationMs += record.durationMs;
       if (record.direction === 'upload') { uploadedFiles++; uploadedBytes += record.size; day.uploadedFiles++; day.uploadedBytes += record.size; }
       else { downloadedFiles++; downloadedBytes += record.size; day.downloadedFiles++; day.downloadedBytes += record.size; }
@@ -92,7 +92,7 @@ export class AnalyticsStore extends EventEmitter implements vscode.Disposable {
     try {
       const bytes = await vscode.workspace.fs.readFile(this.fileUri);
       const parsed = JSON.parse(new TextDecoder().decode(bytes));
-      if (Array.isArray(parsed?.projects)) this.data = { projects: parsed.projects.filter((project: any) => project && typeof project.id === 'string' && Array.isArray(project.records)) };
+      if (Array.isArray(parsed?.projects)) {this.data = { projects: parsed.projects.filter((project: any) => project && typeof project.id === 'string' && Array.isArray(project.records)) };}
     } catch {
       // The first run has no file yet; create it only after a completed transfer.
     }

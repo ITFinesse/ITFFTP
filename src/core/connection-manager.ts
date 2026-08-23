@@ -52,7 +52,7 @@ export class ConnectionManager {
   }
 
   getActiveConnection(): BaseConnection | undefined {
-    if (!this.activeConnectionKey) return undefined;
+    if (!this.activeConnectionKey) {return undefined;}
     const conn = this.connections.get(this.activeConnectionKey);
     return conn?.connected ? conn : undefined;
   }
@@ -66,7 +66,7 @@ export class ConnectionManager {
   getPrimaryConnection(): BaseConnection | undefined {
     if (this.primaryConnectionKey) {
       const conn = this.connections.get(this.primaryConnectionKey);
-      if (conn?.connected) return conn;
+      if (conn?.connected) {return conn;}
     }
     // Fallback to first active connection
     const activeConns = this.getAllActiveConnections();
@@ -90,7 +90,7 @@ export class ConnectionManager {
 
   getAllActiveConnections(): Array<{ connection: BaseConnection; config: FTPConfig }> {
     const result: Array<{ connection: BaseConnection; config: FTPConfig }> = [];
-    for (const [key, conn] of this.connections.entries()) {
+    for (const conn of this.connections.values()) {
       if (conn.connected) {
         result.push({ connection: conn, config: conn.getConfig() });
       }
@@ -163,7 +163,7 @@ export class ConnectionManager {
       title: `${operation === 'upload' ? 'Upload' : 'Download'} - Select Target`
     });
 
-    if (!selected) return undefined;
+    if (!selected) {return undefined;}
 
     const conn = activeConns.find(c =>
       c.config.name === selected.config.name && c.config.host === selected.config.host
@@ -196,7 +196,7 @@ export class ConnectionManager {
         logger.info(`Connecting to ${displayName} (${config.protocol.toUpperCase()})`);
 
         // If no password and no private key, prompt for password
-        let workingConfig = { ...config };
+        const workingConfig = { ...config };
         if (!workingConfig.password && !workingConfig.privateKeyPath) {
           const password = await vscode.window.showInputBox({
             prompt: `Enter password for ${workingConfig.username}@${workingConfig.host}`,
@@ -354,7 +354,7 @@ export class ConnectionManager {
 
   getLifecycle(config: FTPConfig): ConnectionLifecycle {
     const key = this.getConnectionKey(config);
-    if (this.isConnected(config)) return { state: 'connected' };
+    if (this.isConnected(config)) {return { state: 'connected' };}
     return this.connectionStates.get(key) || { state: 'disconnected' };
   }
 
@@ -382,7 +382,7 @@ export class ConnectionManager {
       });
       throw error;
     } finally {
-      if (timeout) clearTimeout(timeout);
+      if (timeout) {clearTimeout(timeout);}
     }
   }
 
@@ -395,7 +395,7 @@ export class ConnectionManager {
   }
 
   private scheduleReconnect(config: FTPConfig, key: string): void {
-    if (config.autoReconnect === false) return;
+    if (config.autoReconnect === false) {return;}
 
     // Avoid auto reconnect if no credentials are available
     if (!config.password && !config.privateKeyPath) {
@@ -403,7 +403,7 @@ export class ConnectionManager {
       return;
     }
 
-    if (this.reconnectTimers.has(key)) return;
+    if (this.reconnectTimers.has(key)) {return;}
 
     const attempt = (this.reconnectAttempts.get(key) || 0) + 1;
     this.reconnectAttempts.set(key, attempt);
@@ -458,7 +458,9 @@ export class ConnectionManager {
     }
 
     try {
-      return await connectionPool.acquire(primaryConfig);
+      const configuredConcurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
+      const poolSize = Math.min(100, Math.max(1, Math.round(configuredConcurrency)));
+      return await connectionPool.acquire(primaryConfig, poolSize);
     } catch (error) {
       logger.warn(`Pool acquire failed for ${config.host}, falling back to primary connection`, error);
       return primary;

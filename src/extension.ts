@@ -6,7 +6,8 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { RemoteExplorerWebviewProvider } from './providers/remote-explorer-webview';
+import * as os from 'os';
+import * as fs from 'fs';
 import { RemoteExplorerTreeProvider } from './providers/remote-explorer-tree';
 import { ConnectionFormProvider } from './providers/connection-form-provider';
 import { RemoteDocumentProvider } from './providers/remote-document-provider';
@@ -16,8 +17,8 @@ import { transferManager } from './core/transfer-manager';
 import { logger } from './utils/logger';
 import { statusBar } from './utils/status-bar';
 import { registerCommands } from './commands';
-import { fileWatcherManager } from './core/file-watcher';
-import { DEFAULT_IGNORE_PATTERNS, isPathIgnored } from './utils/helpers';
+import { fileWatcherManager, WatchedChange } from './core/file-watcher';
+import { DEFAULT_IGNORE_PATTERNS, isPathIgnored, resolveLocalRoot } from './utils/helpers';
 import { TransferQueueTreeProvider } from './providers/transfer-queue-tree';
 import { SettingsPanel } from './providers/settings-panel';
 import { DashboardLauncherProvider } from './providers/dashboard-launcher';
@@ -25,7 +26,6 @@ import { AnalyticsStore } from './core/analytics-store';
 import { FTPConfig } from './types';
 import { isWatcherWriteSuppressed, suppressWatcherWrite } from './core/watcher-suppression';
 
-let remoteExplorerProvider: RemoteExplorerWebviewProvider;
 let remoteTreeProvider: RemoteExplorerTreeProvider;
 let connectionFormProvider: ConnectionFormProvider;
 let remoteDocumentProvider: RemoteDocumentProvider;
@@ -91,9 +91,9 @@ export function activate(context: vscode.ExtensionContext): void {
   settingsPanelProvider = settingsPanel;
   context.subscriptions.push(connectionManager.onConnectionChanged(() => {
     const scope = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!scope) return;
+    if (!scope) {return;}
     const active = configManager.getActiveConfig(scope.fsPath);
-    if (active && connectionManager.isConnected(active)) settingsPanel.scheduleBackgroundRefresh(active);
+    if (active && connectionManager.isConnected(active)) {settingsPanel.scheduleBackgroundRefresh(active);}
   }));
   providerContainer.settingsPanel = settingsPanel;
   const dashboardLauncher = new DashboardLauncherProvider(() => settingsPanel.open());
@@ -234,7 +234,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const configPath = path.join(workspaceRoot, '.vscode', 'sftp.json');
       if (document.fileName === configPath) {
         await loadConfiguration(workspaceRoot);
-        if (connectionFormProvider) connectionFormProvider.refresh();
+        if (connectionFormProvider) {connectionFormProvider.refresh();}
         statusBar.success('Configuration reloaded');
         return;
       }
@@ -243,7 +243,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const editMappings = (global as any).stackerftpEditMappings;
       if (editMappings && editMappings.has(document.fileName)) {
         const metadata = editMappings.get(document.fileName);
-        if (!connectionManager.isConnected(metadata.config)) return;
+        if (!connectionManager.isConnected(metadata.config)) {return;}
         try {
           const connection = connectionManager.getConnection(metadata.config)!;
           await transferManager.uploadFile(connection, document.fileName, metadata.remotePath, metadata.config);
@@ -319,7 +319,7 @@ function scheduleAutoConnect(workspaceRoot: string): void {
 
 function clearAutoConnectTimer(workspaceRoot: string): void {
   const timer = autoConnectTimers.get(workspaceRoot);
-  if (!timer) return;
+  if (!timer) {return;}
   clearTimeout(timer);
   autoConnectTimers.delete(workspaceRoot);
 }
@@ -329,10 +329,10 @@ async function autoConnectConfiguredServer(workspaceRoot: string): Promise<void>
     'stackerftp',
     vscode.Uri.file(workspaceRoot)
   );
-  if (!configuration.get<boolean>('autoConnect', true)) return;
+  if (!configuration.get<boolean>('autoConnect', true)) {return;}
 
   const config = configManager.getActiveConfig(workspaceRoot);
-  if (!config) return;
+  if (!config) {return;}
   if (connectionManager.isConnected(config)) {
     settingsPanelProvider?.scheduleBackgroundRefresh(config);
     return;
@@ -369,16 +369,25 @@ async function autoConnectConfiguredServer(workspaceRoot: string): Promise<void>
 }
 
 async function handleFileSave(document: vscode.TextDocument, workspaceRoot: string): Promise<void> {
-  if (!document.fileName.startsWith(workspaceRoot)) {
-    return;
-  }
-
   const config = configManager.getActiveConfig(workspaceRoot);
   if (!config || !config.uploadOnSave) {
     return;
   }
+  const watcherEnabled = vscode.workspace.getConfiguration(
+    'stackerftp',
+    vscode.Uri.file(workspaceRoot)
+  ).get<boolean>('enableFileWatcher', false);
+  if (watcherEnabled) {
+    // The FileWatcher owns Auto Sync saves so every editor and filesystem edit
+    // follows the same one-second quiet period and is transferred only once.
+    return;
+  }
 
-  const relativePath = path.relative(workspaceRoot, document.fileName);
+  const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+  const localRelation = path.relative(localRoot, document.fileName);
+  if (localRelation === '..' || localRelation.startsWith(`..${path.sep}`) || path.isAbsolute(localRelation)) {return;}
+
+  const relativePath = localRelation;
   if (isPathIgnored(relativePath, [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])])) {
     return;
   }
@@ -448,18 +457,22 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
 
 async function startFileWatcher(workspaceRoot: string): Promise<void> {
   const config = configManager.getActiveConfig(workspaceRoot);
-  if (!config) return;
-  const key = `${workspaceRoot}-${config.host}`;
+  if (!config) {return;}
+  const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+  const key = `${localRoot}-${config.host}`;
   const enabled = vscode.workspace.getConfiguration('stackerftp', vscode.Uri.file(workspaceRoot)).get<boolean>('enableFileWatcher', false);
-  if (!enabled || (!config.watcher && !config.uploadOnSave)) {
+  if (!enabled) {
     fileWatcherManager.stopWatcher(key);
     return;
   }
-  const watcherConfig: FTPConfig = config.watcher ? config : {
+  const watcherConfig: FTPConfig = (config.watcher || !config.uploadOnSave) ? config : {
     ...config,
     watcher: { files: '**/*', autoUpload: true, autoDelete: false }
   };
-  fileWatcherManager.startWatcher(workspaceRoot, watcherConfig);
+  fileWatcherManager.startWatcher(localRoot, watcherConfig, async (change: WatchedChange) => {
+    await settingsPanelProvider?.refreshWatchedPath(config, change.path);
+    if (change.side === 'remote') {remoteTreeProvider?.refresh();}
+  });
 }
 
 export function deactivate(): void {
@@ -478,8 +491,6 @@ export function deactivate(): void {
 
   // Clean up temporary edit files
   try {
-    const os = require('os');
-    const fs = require('fs');
     const tempEditDir = path.join(os.tmpdir(), 'stackerftp-edit');
     if (fs.existsSync(tempEditDir)) {
       fs.rmSync(tempEditDir, { recursive: true, force: true });

@@ -12,7 +12,7 @@ import { transferManager } from '../core/transfer-manager';
 import { FTPConfig, Protocol } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { normalizeRemotePath, formatFileSize, sanitizeRelativePath } from '../utils/helpers';
+import { normalizeRemotePath, formatFileSize, sanitizeRelativePath, resolveLocalRoot } from '../utils/helpers';
 import { ConnectionWizard } from '../core/connection-wizard';
 import { createGitIntegration } from '../core/git-integration';
 import { getWorkspaceRoot } from './utils';
@@ -66,7 +66,7 @@ async function promptOptionalInput(
 }
 
 async function promptOptionalPort(existing?: number): Promise<number | undefined | null> {
-  while (true) {
+  for (;;) {
     const rawValue = await promptOptionalInput(
       'Profile port override',
       typeof existing === 'number' ? String(existing) : '',
@@ -136,7 +136,7 @@ async function promptForProfileOverrides(
   const profile: Partial<FTPConfig> = { ...existing };
 
   const protocol = await promptProfileProtocol(existing.protocol);
-  if (protocol === undefined) return undefined;
+  if (protocol === undefined) {return undefined;}
   setOptionalProfileField(profile, 'protocol', protocol ?? undefined);
 
   const host = await promptOptionalInput(
@@ -144,11 +144,11 @@ async function promptForProfileOverrides(
     existing.host || '',
     'Leave empty to inherit the base connection host'
   );
-  if (host === undefined) return undefined;
+  if (host === undefined) {return undefined;}
   setOptionalProfileField(profile, 'host', host.trim() || undefined);
 
   const port = await promptOptionalPort(existing.port);
-  if (port === undefined) return undefined;
+  if (port === undefined) {return undefined;}
   setOptionalProfileField(profile, 'port', port === null ? undefined : port);
 
   const username = await promptOptionalInput(
@@ -156,7 +156,7 @@ async function promptForProfileOverrides(
     existing.username || '',
     'Leave empty to inherit the base connection username'
   );
-  if (username === undefined) return undefined;
+  if (username === undefined) {return undefined;}
   setOptionalProfileField(profile, 'username', username.trim() || undefined);
 
   const remotePath = await promptOptionalInput(
@@ -164,7 +164,7 @@ async function promptForProfileOverrides(
     existing.remotePath || '',
     'Leave empty to inherit the base connection remote path'
   );
-  if (remotePath === undefined) return undefined;
+  if (remotePath === undefined) {return undefined;}
   setOptionalProfileField(profile, 'remotePath', remotePath.trim() || undefined);
 
   const password = await promptOptionalInput(
@@ -172,7 +172,7 @@ async function promptForProfileOverrides(
     existing.password || '',
     'Leave empty to inherit the base connection password'
   );
-  if (password === undefined) return undefined;
+  if (password === undefined) {return undefined;}
   setOptionalProfileField(profile, 'password', password || undefined);
 
   const privateKeyPath = await promptOptionalInput(
@@ -180,7 +180,7 @@ async function promptForProfileOverrides(
     existing.privateKeyPath || '',
     'Leave empty to inherit the base connection private key path'
   );
-  if (privateKeyPath === undefined) return undefined;
+  if (privateKeyPath === undefined) {return undefined;}
   setOptionalProfileField(profile, 'privateKeyPath', privateKeyPath.trim() || undefined);
 
   const passphrase = await promptOptionalInput(
@@ -188,11 +188,11 @@ async function promptForProfileOverrides(
     existing.passphrase || '',
     'Leave empty to inherit the base connection passphrase'
   );
-  if (passphrase === undefined) return undefined;
+  if (passphrase === undefined) {return undefined;}
   setOptionalProfileField(profile, 'passphrase', passphrase || undefined);
 
   const secure = await promptProfileSecure(existing.secure);
-  if (secure === undefined) return undefined;
+  if (secure === undefined) {return undefined;}
   setOptionalProfileField(profile, 'secure', secure ?? undefined);
 
   return profile;
@@ -220,7 +220,7 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
     }
   );
 
-  if (!selectedConfigItem) return;
+  if (!selectedConfigItem) {return;}
 
   const config = configs[selectedConfigItem.index];
   const profileNames = Object.keys(config.profiles || {});
@@ -250,7 +250,7 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
     ignoreFocusOut: true
   });
 
-  if (!selectedAction) return;
+  if (!selectedAction) {return;}
 
   if (selectedAction.value === 'openJson') {
     const configPath = configManager.getConfigPath(workspaceRoot);
@@ -269,16 +269,16 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
         ignoreFocusOut: true,
         validateInput: (value) => {
           const trimmed = value.trim();
-          if (!trimmed) return 'Profile name is required';
-          if (config.profiles?.[trimmed]) return 'A profile with this name already exists';
+          if (!trimmed) {return 'Profile name is required';}
+          if (config.profiles?.[trimmed]) {return 'A profile with this name already exists';}
           return null;
         }
       });
 
-      if (!profileName) return;
+      if (!profileName) {return;}
 
       const overrides = await promptForProfileOverrides(profileName.trim());
-      if (!overrides) return;
+      if (!overrides) {return;}
 
       config.profiles[profileName.trim()] = overrides;
 
@@ -304,10 +304,10 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
         ignoreFocusOut: true
       });
 
-      if (!selectedProfile) return;
+      if (!selectedProfile) {return;}
 
       const overrides = await promptForProfileOverrides(selectedProfile, config.profiles[selectedProfile]);
-      if (!overrides) return;
+      if (!overrides) {return;}
 
       config.profiles[selectedProfile] = overrides;
       break;
@@ -319,7 +319,7 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
         ignoreFocusOut: true
       });
 
-      if (!selectedProfile) return;
+      if (!selectedProfile) {return;}
 
       const confirm = await vscode.window.showWarningMessage(
         `Delete profile "${selectedProfile}" from ${getConnectionLabel(config)}?`,
@@ -328,7 +328,7 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
         'Cancel'
       );
 
-      if (confirm !== 'Delete') return;
+      if (confirm !== 'Delete') {return;}
 
       delete config.profiles[selectedProfile];
       if (config.defaultProfile === selectedProfile) {
@@ -343,7 +343,7 @@ async function manageProfiles(workspaceRoot: string): Promise<void> {
         ignoreFocusOut: true
       });
 
-      if (!selectedProfile) return;
+      if (!selectedProfile) {return;}
       config.defaultProfile = selectedProfile;
       break;
     }
@@ -373,7 +373,7 @@ export function registerCommands(
 
   const configCommand = vscode.commands.registerCommand('stackerftp.config', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     if (configManager.configExists(workspaceRoot)) {
       const choice = await vscode.window.showQuickPick(
@@ -386,17 +386,18 @@ export function registerCommands(
         { placeHolder: 'Select an action' }
       );
 
-      if (!choice) return;
+      if (!choice) {return;}
 
       switch (choice.value) {
         case 'wizard':
           await ConnectionWizard.createNewConnection(workspaceRoot);
           break;
-        case 'open':
+        case 'open': {
           const configPath = configManager.getConfigPath(workspaceRoot);
           const doc = await vscode.workspace.openTextDocument(configPath);
           await vscode.window.showTextDocument(doc);
           break;
+        }
         case 'json':
           await configManager.createDefaultConfig(workspaceRoot);
           break;
@@ -426,7 +427,7 @@ export function registerCommands(
 
   const connectCommand = vscode.commands.registerCommand('stackerftp.connect', async (item?: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // Handle direct connection from tree view
     if (item && item.config) {
@@ -504,7 +505,7 @@ export function registerCommands(
       placeHolder: 'Choose a server to connect'
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     try {
       await connectionManager.connect(selected.config);
@@ -561,7 +562,7 @@ export function registerCommands(
 
   const setProfileCommand = vscode.commands.registerCommand('stackerftp.setProfile', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const profiles = configManager.getAvailableProfiles(workspaceRoot);
     if (profiles.length === 0) {
@@ -588,7 +589,7 @@ export function registerCommands(
       selectedItems?: (vscode.Uri | { resourceUri: vscode.Uri })[]
     ) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // VS Code context menus pass multi-selection as the second argument.
     const items = selectedItems && selectedItems.length > 0
@@ -603,7 +604,7 @@ export function registerCommands(
     // Extract local paths from items
     const localPaths: string[] = [];
     for (const item of items) {
-      if (!item) continue;
+      if (!item) {continue;}
       if ('resourceUri' in item) {
         localPaths.push(item.resourceUri.fsPath);
       } else if ('fsPath' in item) {
@@ -637,7 +638,7 @@ export function registerCommands(
     } else {
       // Multiple connections - ask user or use primary
       const selected = await connectionManager.selectConnectionForTransfer('upload');
-      if (!selected) return;
+      if (!selected) {return;}
       config = selected.config;
       connection = selected.connection;
     }
@@ -645,10 +646,11 @@ export function registerCommands(
     try {
       let uploadedCount = 0;
       let failedCount = 0;
+      const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
 
       for (const localPath of localPaths) {
         try {
-          const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+          const relativePath = sanitizeRelativePath(path.relative(localRoot, localPath));
           const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
           if (fs.statSync(localPath).isDirectory()) {
@@ -691,7 +693,7 @@ export function registerCommands(
 
     const localPath = editor.document.fileName;
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // Check for active connections first
     const activeConns = connectionManager.getAllActiveConnections();
@@ -711,13 +713,13 @@ export function registerCommands(
       connection = activeConns[0].connection;
     } else {
       const selected = await connectionManager.selectConnectionForTransfer('upload');
-      if (!selected) return;
+      if (!selected) {return;}
       config = selected.config;
       connection = selected.connection;
     }
 
     try {
-      const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+      const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, config.localPath), localPath));
       const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
       // Save file first if modified
@@ -745,7 +747,7 @@ export function registerCommands(
 
   const downloadCommand = vscode.commands.registerCommand('stackerftp.download', async (itemOrItems?: any | any[], selectedItems?: any[]) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -765,13 +767,14 @@ export function registerCommands(
 
     try {
       const connection = await connectionManager.ensureConnection(config);
+      const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
 
       let downloadedCount = 0;
       let failedCount = 0;
       let handledCount = 0;
 
       for (const itemOrResource of items) {
-        if (!itemOrResource) continue;
+        if (!itemOrResource) {continue;}
 
         let remotePath: string;
         let localPath: string;
@@ -781,12 +784,12 @@ export function registerCommands(
         if (itemOrResource && 'resourceUri' in itemOrResource) {
           // SCM resource - download from remote to this local file
           localPath = itemOrResource.resourceUri.fsPath;
-          const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+          const relativePath = sanitizeRelativePath(path.relative(localRoot, localPath));
           remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
         } else if (itemOrResource && 'fsPath' in itemOrResource) {
           // Local Explorer / editor resource - download matching remote path to selected local target
           localPath = itemOrResource.fsPath;
-          const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+          const relativePath = sanitizeRelativePath(path.relative(localRoot, localPath));
           remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
           try {
@@ -798,7 +801,7 @@ export function registerCommands(
           // Remote explorer item
           remotePath = itemOrResource.entry.path;
           const relativePath = path.relative(config.remotePath, remotePath);
-          localPath = path.join(workspaceRoot, relativePath);
+          localPath = path.join(localRoot, relativePath);
           isDirectory = itemOrResource.entry.type === 'directory' ||
             (itemOrResource.entry.type === 'symlink' && itemOrResource.entry.isSymlinkToDirectory);
         } else {
@@ -844,7 +847,7 @@ export function registerCommands(
 
   const downloadProjectCommand = vscode.commands.registerCommand('stackerftp.downloadProject', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -856,11 +859,11 @@ export function registerCommands(
       'Download entire project?',
       'Yes', 'No'
     );
-    if (choice !== 'Yes') return;
+    if (choice !== 'Yes') {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
-      const result = await transferManager.downloadDirectory(connection, config.remotePath, workspaceRoot, config);
+      const result = await transferManager.downloadDirectory(connection, config.remotePath, resolveLocalRoot(workspaceRoot, config.localPath), config);
       showSyncResult(result, 'download');
       statusBar.success('Project downloaded successfully');
     } catch (error: any) {
@@ -884,7 +887,7 @@ export function registerCommands(
 
   async function performSync(direction: 'toRemote' | 'toLocal' | 'both', uri?: vscode.Uri) {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -900,21 +903,22 @@ export function registerCommands(
         { modal: true },
         'Yes', 'No'
       );
-      if (choice !== 'Yes') return;
+      if (choice !== 'Yes') {return;}
     }
 
     try {
       const connection = await connectionManager.ensureConnection(config);
+      const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
 
       let localPath: string;
       let remotePath: string;
 
       if (uri) {
         localPath = uri.fsPath;
-        const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+        const relativePath = sanitizeRelativePath(path.relative(localRoot, localPath));
         remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
       } else {
-        localPath = workspaceRoot;
+        localPath = localRoot;
         remotePath = config.remotePath;
       }
 
@@ -934,7 +938,7 @@ export function registerCommands(
     }
   }
 
-  function showSyncResult(result: { uploaded: string[]; downloaded: string[]; failed: any[] }, type: string): void {
+  function showSyncResult(result: { uploaded: string[]; downloaded: string[]; failed: any[] }, _type: string): void {
     const messages: string[] = [];
 
     if (result.uploaded.length > 0) {
@@ -960,10 +964,10 @@ export function registerCommands(
 
   const openRemoteFileCommand = vscode.commands.registerCommand('stackerftp.openRemoteFile', async (item: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -1007,14 +1011,14 @@ export function registerCommands(
         { modal: true },
         'Delete', 'Cancel'
       );
-      if (choice !== 'Delete') return;
+      if (choice !== 'Delete') {return;}
     }
 
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -1040,7 +1044,7 @@ export function registerCommands(
       placeHolder: 'new-folder'
     });
 
-    if (!folderName) return;
+    if (!folderName) {return;}
 
     // Get config and connection from item if available, otherwise pick from active connections
     let config: any;
@@ -1063,7 +1067,7 @@ export function registerCommands(
           activeConnections.map(c => ({ label: c.config.name || c.config.host, config: c.config, connection: c.connection })),
           { placeHolder: 'Select connection for new folder' }
         );
-        if (!selected) return;
+        if (!selected) {return;}
         config = selected.config;
         connection = selected.connection;
       }
@@ -1088,7 +1092,7 @@ export function registerCommands(
       await connection.mkdir(newPath);
 
       statusBar.success(`Created folder: ${folderName}`);
-      if (remoteExplorer) remoteExplorer.refresh();
+      if (remoteExplorer) {remoteExplorer.refresh();}
 
     } catch (error: any) {
       statusBar.error(`Failed to create folder: ${error.message}`, true);
@@ -1101,7 +1105,7 @@ export function registerCommands(
       placeHolder: 'new-file.txt'
     });
 
-    if (!fileName) return;
+    if (!fileName) {return;}
 
     // Get config and connection from item if available, otherwise pick from active connections
     let config: any;
@@ -1124,7 +1128,7 @@ export function registerCommands(
           activeConnections.map(c => ({ label: c.config.name || c.config.host, config: c.config, connection: c.connection })),
           { placeHolder: 'Select connection for new file' }
         );
-        if (!selected) return;
+        if (!selected) {return;}
         config = selected.config;
         connection = selected.connection;
       }
@@ -1149,7 +1153,7 @@ export function registerCommands(
       await connection.writeFile(newPath, '');
 
       statusBar.success(`Created file: ${fileName}`);
-      if (remoteExplorer) remoteExplorer.refresh();
+      if (remoteExplorer) {remoteExplorer.refresh();}
 
     } catch (error: any) {
       statusBar.error(`Failed to create file: ${error.message}`, true);
@@ -1187,7 +1191,7 @@ export function registerCommands(
     maxDepth: number,
     currentDepth: number = 0
   ): Promise<void> {
-    if (currentDepth >= maxDepth) return;
+    if (currentDepth >= maxDepth) {return;}
 
     try {
       // Reveal and expand the item
@@ -1217,7 +1221,7 @@ export function registerCommands(
 
     try {
       const rootItems = await remoteExplorer.getChildren();
-      if (!rootItems || rootItems.length === 0) return;
+      if (!rootItems || rootItems.length === 0) {return;}
 
       // Collapse each root item
       for (const item of rootItems) {
@@ -1235,7 +1239,7 @@ export function registerCommands(
 
   // Expand single connection
   const expandConnectionCommand = vscode.commands.registerCommand('stackerftp.expandConnection', async (item: any) => {
-    if (!treeView || !remoteExplorer || !item) return;
+    if (!treeView || !remoteExplorer || !item) {return;}
 
     try {
       await expandItemRecursively(treeView, remoteExplorer, item, 3);
@@ -1248,7 +1252,7 @@ export function registerCommands(
 
   // Collapse single connection
   const collapseConnectionCommand = vscode.commands.registerCommand('stackerftp.collapseConnection', async (item: any) => {
-    if (!treeView || !item) return;
+    if (!treeView || !item) {return;}
 
     try {
       await treeView.reveal(item, { expand: false, select: false, focus: false });
@@ -1270,7 +1274,7 @@ export function registerCommands(
       value: item.entry.name
     });
 
-    if (!newName || newName === item.entry.name) return;
+    if (!newName || newName === item.entry.name) {return;}
 
     // Get config and connection from item
     const config = item.config;
@@ -1286,7 +1290,7 @@ export function registerCommands(
 
       await connection.rename(item.entry.path, newPath);
       statusBar.success(`Renamed to: ${newName}`);
-      if (remoteExplorer) remoteExplorer.refresh();
+      if (remoteExplorer) {remoteExplorer.refresh();}
 
     } catch (error: any) {
       statusBar.error(`Rename failed: ${error.message}`, true);
@@ -1318,7 +1322,7 @@ export function registerCommands(
 
       await connection.writeFile(newPath, content);
       statusBar.success(`Duplicated: ${newName}`);
-      if (remoteExplorer) remoteExplorer.refresh();
+      if (remoteExplorer) {remoteExplorer.refresh();}
 
     } catch (error: any) {
       statusBar.error(`Duplicate failed: ${error.message}`, true);
@@ -1341,7 +1345,7 @@ export function registerCommands(
 
   const diffCommand = vscode.commands.registerCommand('stackerftp.diff', async (firstArg?: any, secondArg?: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     try {
       // A view/item context menu passes the TreeItem as the first argument,
@@ -1382,7 +1386,7 @@ export function registerCommands(
         if (relativePath.startsWith('/')) {
           relativePath = relativePath.substring(1);
         }
-        localPath = path.join(workspaceRoot, relativePath);
+        localPath = path.join(resolveLocalRoot(workspaceRoot, activeConfig.localPath), relativePath);
       } else if (uri) {
         // Called from local file
         activeConfig = configManager.getActiveConfig(workspaceRoot);
@@ -1391,7 +1395,7 @@ export function registerCommands(
           return;
         }
         localPath = uri.fsPath;
-        const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+        const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, activeConfig.localPath), localPath));
         remotePath = normalizeRemotePath(path.posix.join(activeConfig.remotePath, relativePath.replace(/\\/g, '/')));
         fileName = path.basename(localPath);
       } else {
@@ -1432,7 +1436,7 @@ export function registerCommands(
 
   const terminalCommand = vscode.commands.registerCommand('stackerftp.terminal', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // Get active connections
     const activeConns = connectionManager.getAllActiveConnections();
@@ -1458,7 +1462,7 @@ export function registerCommands(
         placeHolder: 'Select a server to connect and open terminal'
       });
 
-      if (!selected) return;
+      if (!selected) {return;}
 
       try {
         await connectionManager.connect(selected.config);
@@ -1488,11 +1492,11 @@ export function registerCommands(
         placeHolder: 'Select connection for terminal'
       });
 
-      if (!selected) return;
+      if (!selected) {return;}
       targetConfig = selected.config;
     }
 
-    if (!targetConfig) return;
+    if (!targetConfig) {return;}
 
     if (targetConfig.protocol !== 'sftp') {
       statusBar.error('Remote terminal is only available with SFTP protocol');
@@ -1602,7 +1606,7 @@ export function registerCommands(
 
   const uploadChangedFilesCommand = vscode.commands.registerCommand('stackerftp.uploadChangedFiles', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -1634,7 +1638,7 @@ export function registerCommands(
         { placeHolder: `${uploadableFiles.length} changed files found` }
       );
 
-      if (!choice) return;
+      if (!choice) {return;}
 
       let filesToUpload = uploadableFiles;
 
@@ -1652,7 +1656,7 @@ export function registerCommands(
           }
         );
 
-        if (!selected || selected.length === 0) return;
+        if (!selected || selected.length === 0) {return;}
         filesToUpload = selected.map(s => s.file);
       }
 
@@ -1667,7 +1671,7 @@ export function registerCommands(
         const total = filesToUpload.length;
 
         for (const file of filesToUpload) {
-          if (token.isCancellationRequested) break;
+          if (token.isCancellationRequested) {break;}
 
           const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, file.absolutePath));
           const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
@@ -1681,7 +1685,7 @@ export function registerCommands(
             const remoteDir = normalizeRemotePath(path.dirname(remotePath));
             try {
               await connection.mkdir(remoteDir);
-            } catch { }
+            } catch { /* Directory may already exist. */ }
 
             await transferManager.uploadFile(connection, file.absolutePath, remotePath, config);
             uploaded++;
@@ -1700,7 +1704,7 @@ export function registerCommands(
 
   const uploadProjectCommand = vscode.commands.registerCommand('stackerftp.uploadProject', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -1714,11 +1718,11 @@ export function registerCommands(
       'Yes', 'No'
     );
 
-    if (choice !== 'Yes') return;
+    if (choice !== 'Yes') {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
-      const result = await transferManager.uploadDirectory(connection, workspaceRoot, config.remotePath, config);
+      const result = await transferManager.uploadDirectory(connection, resolveLocalRoot(workspaceRoot, config.localPath), config.remotePath, config);
 
       statusBar.success(`Project uploaded: ${result.uploaded.length} files (${result.failed.length} failed)`);
     } catch (error: any) {
@@ -1730,7 +1734,7 @@ export function registerCommands(
 
   const listCommand = vscode.commands.registerCommand('stackerftp.list', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -1756,7 +1760,7 @@ export function registerCommands(
       if (selected && selected.entry.type === 'file') {
         // Download and open
         const relativePath = path.relative(config.remotePath, selected.entry.path);
-        const localPath = path.join(workspaceRoot, relativePath);
+        const localPath = path.join(resolveLocalRoot(workspaceRoot, config.localPath), relativePath);
         const localDir = path.dirname(localPath);
 
         if (!fs.existsSync(localDir)) {
@@ -1774,7 +1778,7 @@ export function registerCommands(
 
   const listAllCommand = vscode.commands.registerCommand('stackerftp.listAll', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -1787,7 +1791,7 @@ export function registerCommands(
 
       const allFiles: any[] = [];
 
-      async function listRecursive(dirPath: string) {
+      const listRecursive = async (dirPath: string): Promise<void> => {
         const entries = await connection.list(dirPath);
         for (const entry of entries) {
           if (entry.type === 'file') {
@@ -1796,7 +1800,7 @@ export function registerCommands(
             await listRecursive(entry.path);
           }
         }
-      }
+      };
 
       await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
@@ -1820,7 +1824,7 @@ export function registerCommands(
 
       if (selected) {
         const relativePath = path.relative(config.remotePath, selected.entry.path);
-        const localPath = path.join(workspaceRoot, relativePath);
+        const localPath = path.join(resolveLocalRoot(workspaceRoot, config.localPath), relativePath);
         const localDir = path.dirname(localPath);
 
         if (!fs.existsSync(localDir)) {
@@ -1840,7 +1844,7 @@ export function registerCommands(
 
   const refreshActiveFileCommand = vscode.commands.registerCommand('stackerftp.refreshActiveFile', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -1855,14 +1859,16 @@ export function registerCommands(
     }
 
     const localPath = activeEditor.document.fileName;
-    if (!localPath.startsWith(workspaceRoot)) {
+    const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+    const localRelation = path.relative(localRoot, localPath);
+    if (localRelation === '..' || localRelation.startsWith(`..${path.sep}`) || path.isAbsolute(localRelation)) {
       statusBar.error('File is not in workspace');
       return;
     }
 
     try {
       const connection = await connectionManager.ensureConnection(config);
-      const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+      const relativePath = sanitizeRelativePath(localRelation);
       const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
       await transferManager.downloadFile(connection, remotePath, localPath);
@@ -1910,7 +1916,7 @@ export function registerCommands(
       placeHolder: 'Select target remote server'
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     // Ask for target path
     const targetPath = await vscode.window.showInputBox({
@@ -1919,7 +1925,7 @@ export function registerCommands(
       placeHolder: '/remote/path/filename'
     });
 
-    if (!targetPath) return;
+    if (!targetPath) {return;}
 
     try {
       const sourceConnection = connectionManager.getConnection(sourceConfig);
@@ -1929,7 +1935,6 @@ export function registerCommands(
       }
 
       // Create temp file
-      const os = require('os');
       const tempDir = path.join(os.tmpdir(), 'stackerftp-transfer');
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
@@ -1994,7 +1999,7 @@ export function registerCommands(
       placeHolder: 'Select remote server to compare with'
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     // Ask for target file path
     const targetPath = await vscode.window.showInputBox({
@@ -2003,7 +2008,7 @@ export function registerCommands(
       placeHolder: '/remote/path/filename'
     });
 
-    if (!targetPath) return;
+    if (!targetPath) {return;}
 
     try {
       const sourceConnection = connectionManager.getConnection(sourceConfig);
@@ -2012,7 +2017,6 @@ export function registerCommands(
         return;
       }
 
-      const os = require('os');
       const tempDir = path.join(os.tmpdir(), 'stackerftp-compare');
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
@@ -2080,7 +2084,7 @@ export function registerCommands(
       placeHolder: 'Select target remote server for sync'
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     const targetPath = await vscode.window.showInputBox({
       prompt: 'Enter target folder path',
@@ -2088,7 +2092,7 @@ export function registerCommands(
       placeHolder: '/remote/path/folder'
     });
 
-    if (!targetPath) return;
+    if (!targetPath) {return;}
 
     const confirm = await vscode.window.showWarningMessage(
       `Sync folder "${item.entry.name}" from ${sourceConfig.host} to ${selected.config.host}?`,
@@ -2096,7 +2100,7 @@ export function registerCommands(
       'Sync'
     );
 
-    if (confirm !== 'Sync') return;
+    if (confirm !== 'Sync') {return;}
 
     try {
       const sourceConnection = connectionManager.getConnection(sourceConfig);
@@ -2109,7 +2113,6 @@ export function registerCommands(
       const sourceFiles = await sourceConnection.list(item.entry.path);
       const files = sourceFiles.filter(f => f.type === 'file');
 
-      const os = require('os');
       const tempDir = path.join(os.tmpdir(), 'stackerftp-sync', Date.now().toString());
       fs.mkdirSync(tempDir, { recursive: true });
 
@@ -2122,7 +2125,7 @@ export function registerCommands(
         cancellable: true
       }, async (progress, token) => {
         for (const file of files) {
-          if (token.isCancellationRequested) break;
+          if (token.isCancellationRequested) {break;}
 
           const fileName = file.name;
           const sourcePath = file.path;
@@ -2160,7 +2163,7 @@ export function registerCommands(
 
   const revealInRemoteExplorerCommand = vscode.commands.registerCommand('stackerftp.revealInRemoteExplorer', async (uri?: vscode.Uri) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -2181,13 +2184,15 @@ export function registerCommands(
       return;
     }
 
-    if (!localPath.startsWith(workspaceRoot)) {
+    const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+    const localRelation = path.relative(localRoot, localPath);
+    if (localRelation === '..' || localRelation.startsWith(`..${path.sep}`) || path.isAbsolute(localRelation)) {
       statusBar.error('File is not in workspace');
       return;
     }
 
     try {
-      const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+      const relativePath = sanitizeRelativePath(localRelation);
       const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
       await connectionManager.ensureConnection(config);
@@ -2212,14 +2217,14 @@ export function registerCommands(
 
   const switchProtocolCommand = vscode.commands.registerCommand('stackerftp.switchProtocol', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     await ConnectionWizard.switchProtocol(workspaceRoot);
   });
 
   const quickConnectCommand = vscode.commands.registerCommand('stackerftp.quickConnect', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
 
@@ -2256,7 +2261,7 @@ export function registerCommands(
       placeHolder: 'Choose a connection to connect/disconnect'
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     if (connectionManager.isConnected(selected.config)) {
       await connectionManager.disconnect(selected.config);
@@ -2275,7 +2280,7 @@ export function registerCommands(
 
   const uploadToAllProfilesCommand = vscode.commands.registerCommand('stackerftp.uploadToAllProfiles', async (uri: vscode.Uri, selectedItems?: vscode.Uri[]) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
     if (configs.length === 0) {
@@ -2313,7 +2318,7 @@ export function registerCommands(
 
           try {
             const connection = await connectionManager.ensureConnection(config);
-            const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+            const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, config.localPath), localPath));
             const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
             // Ensure remote directory exists
@@ -2429,7 +2434,7 @@ export function registerCommands(
 
   const editInLocalCommand = vscode.commands.registerCommand('stackerftp.editInLocal', async (item?: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // Use item's config if available, otherwise get active config
     const config = item?.config || configManager.getActiveConfig(workspaceRoot);
@@ -2470,7 +2475,7 @@ export function registerCommands(
 
       // Open in editor
       const doc = await vscode.workspace.openTextDocument(tempPath);
-      const editor = await vscode.window.showTextDocument(doc);
+      await vscode.window.showTextDocument(doc);
 
       // Store mapping for upload on save
       const metadata = {
@@ -2491,7 +2496,7 @@ export function registerCommands(
 
   const revealInExplorerCommand = vscode.commands.registerCommand('stackerftp.revealInExplorer', async (item?: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -2507,7 +2512,7 @@ export function registerCommands(
     try {
       const remotePath = item.entry.path;
       const relativePath = path.relative(config.remotePath, remotePath);
-      const localPath = path.join(workspaceRoot, relativePath);
+      const localPath = path.join(resolveLocalRoot(workspaceRoot, config.localPath), relativePath);
 
       if (fs.existsSync(localPath)) {
         // Reveal in VS Code explorer
@@ -2536,7 +2541,7 @@ export function registerCommands(
 
   const forceUploadCommand = vscode.commands.registerCommand('stackerftp.forceUpload', async (uri: vscode.Uri, selectedItems?: vscode.Uri[]) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -2560,7 +2565,7 @@ export function registerCommands(
       { modal: true },
       'Yes', 'No'
     );
-    if (choice !== 'Yes') return;
+    if (choice !== 'Yes') {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -2569,7 +2574,7 @@ export function registerCommands(
 
       for (const localPath of localPaths) {
         try {
-          const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+          const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, config.localPath), localPath));
           const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
           // Ensure remote directory exists
@@ -2599,7 +2604,7 @@ export function registerCommands(
 
   const forceDownloadCommand = vscode.commands.registerCommand('stackerftp.forceDownload', async (uri: vscode.Uri, selectedItems?: vscode.Uri[]) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -2623,7 +2628,7 @@ export function registerCommands(
       { modal: true },
       'Yes', 'No'
     );
-    if (choice !== 'Yes') return;
+    if (choice !== 'Yes') {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -2632,7 +2637,7 @@ export function registerCommands(
 
       for (const localPath of localPaths) {
         try {
-          const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+          const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, config.localPath), localPath));
           const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
 
           await transferManager.downloadFile(connection, remotePath, localPath);
@@ -2660,7 +2665,7 @@ export function registerCommands(
 
   const listRemoteRevisionsCommand = vscode.commands.registerCommand('stackerftp.listRemoteRevisions', async (uri: vscode.Uri) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
@@ -2676,12 +2681,10 @@ export function registerCommands(
 
     try {
       const connection = await connectionManager.ensureConnection(config);
-      const relativePath = sanitizeRelativePath(path.relative(workspaceRoot, localPath));
+      const relativePath = sanitizeRelativePath(path.relative(resolveLocalRoot(workspaceRoot, config.localPath), localPath));
       const remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
       const remoteDir = path.dirname(remotePath);
       const baseName = path.basename(remotePath, path.extname(remotePath));
-      const ext = path.extname(remotePath);
-
       // List directory and find backup files
       const entries = await connection.list(remoteDir);
       const revisions = entries.filter(e =>
@@ -2771,7 +2774,7 @@ export function registerCommands(
       'Delete', 'Cancel'
     );
 
-    if (confirm !== 'Delete') return;
+    if (confirm !== 'Delete') {return;}
 
     if (container.remoteExplorer) {
       // Multi-select: skip individual confirm dialogs

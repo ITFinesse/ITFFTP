@@ -3,7 +3,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { FileEntry } from '../types';
 import { formatFileSize, formatDate, getFileIcon, formatPermissions } from '../utils/helpers';
 

@@ -6,6 +6,8 @@ export type ComparableFile = {
 
 export type DiffStatus = 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
 
+export type SyncDirection = 'up' | 'down';
+
 /** Classify a paired path after any watcher-dirty byte verification has run. */
 export function classifyDiff(record: ComparableFile, locallyDirty = false): DiffStatus {
   if (!record.local) { return 'missing-local'; }
@@ -22,6 +24,24 @@ export function newerSide(record: ComparableFile, locallyDirty = false): 'local'
   const remoteTime = Number(record.remote.modifyTime) || 0;
   if (localTime <= 0 || remoteTime <= 0 || localTime === remoteTime) { return undefined; }
   return localTime > remoteTime ? 'local' : 'remote';
+}
+
+/** Select only changes that originate on the requested side. Bulk sync must
+ * not turn every pre-existing mismatch into an overwrite operation. */
+export function shouldSyncDiff(
+  record: ComparableFile & { status: DiffStatus },
+  direction: SyncDirection,
+  locallyDirty = false
+): boolean {
+  if (direction === 'up') {
+    if (record.status === 'missing-remote') { return Boolean(record.local); }
+    if (record.status !== 'modified' && record.status !== 'type-changed') { return false; }
+    return Boolean(record.local) && (locallyDirty || newerSide(record) === 'local');
+  }
+
+  if (record.status === 'missing-local') { return Boolean(record.remote); }
+  if (record.status !== 'modified' && record.status !== 'type-changed') { return false; }
+  return Boolean(record.remote) && !locallyDirty && newerSide(record) === 'remote';
 }
 
 /** Remove child actions already covered by a recursive directory transfer. */

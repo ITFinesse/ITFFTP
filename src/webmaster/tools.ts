@@ -5,9 +5,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
+import * as os from 'os';
 import { BaseConnection } from '../core/connection';
-import { FileEntry, ChecksumResult, SearchResult, FileInfo, FTPConfig, CompareItem, CompareTreeNode, CompareResult } from '../types';
+import { FileEntry, ChecksumResult, SearchResult, FileInfo, FTPConfig, CompareItem, CompareTreeNode } from '../types';
 import { DEFAULT_IGNORE_PATTERNS, formatFileSize, formatDate, formatPermissions, calculateChecksum, isPathIgnored } from '../utils/helpers';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
@@ -49,7 +49,7 @@ export class WebMasterTools {
       }
     });
 
-    if (!modeString) return;
+    if (!modeString) {return;}
 
     try {
       await this.changePermissions(connection, entry.path, parseInt(modeString, 8));
@@ -72,14 +72,14 @@ export class WebMasterTools {
       
       if (result.code === 0) {
         const match = result.stdout.match(/^([a-f0-9]+)/);
-        if (match) return match[1];
+        if (match) {return match[1];}
       }
     } catch {
       // Fallback: download and calculate locally
     }
 
     // Fallback: download to temp and calculate
-    const tempPath = path.join(require('os').tmpdir(), `stackerftp-checksum-${Date.now()}`);
+    const tempPath = path.join(os.tmpdir(), `stackerftp-checksum-${Date.now()}`);
     try {
       await connection.download(remotePath, tempPath);
       const checksum = await calculateChecksum(tempPath, algorithm);
@@ -239,14 +239,14 @@ export class WebMasterTools {
 
     // Check if pattern matches
     const matches = (name: string): boolean => {
-      if (regex.test(name)) return true;
-      if (patternLower.includes(name.toLowerCase())) return true;
+      if (regex.test(name)) {return true;}
+      if (patternLower.includes(name.toLowerCase())) {return true;}
       return false;
     };
 
     // Recursive search with parallel processing
     const searchDir = async (dirPath: string, depth: number = 0): Promise<void> => {
-      if (results.length >= maxResults) return;
+      if (results.length >= maxResults) {return;}
 
       try {
         const entries = await connection.list(dirPath);
@@ -257,7 +257,7 @@ export class WebMasterTools {
 
         // Check files
         for (const entry of files) {
-          if (results.length >= maxResults) return;
+          if (results.length >= maxResults) {return;}
 
           if (matches(entry.name)) {
             results.push({
@@ -295,7 +295,7 @@ export class WebMasterTools {
 
     // Sort: directories first, then by name
     results.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      if (a.type !== b.type) {return a.type === 'directory' ? -1 : 1;}
       return a.name.localeCompare(b.name);
     });
 
@@ -331,7 +331,7 @@ export class WebMasterTools {
       matchOnDetail: true
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     if (selected.isDirectory) {
       // Navigate to folder in remote explorer
@@ -350,7 +350,7 @@ export class WebMasterTools {
         placeHolder: 'What would you like to do?'
       });
 
-      if (!choice) return;
+      if (!choice) {return;}
 
       const localPath = path.join(workspaceRoot, path.relative(config.remotePath, selected.path));
       const localDir = path.dirname(localPath);
@@ -821,12 +821,12 @@ export class WebMasterTools {
       placeHolder: 'search text',
       ignoreFocusOut: true,
       validateInput: (value) => {
-        if (!value?.trim()) return 'Search text is required';
+        if (!value?.trim()) {return 'Search text is required';}
         return null;
       }
     });
 
-    if (!find) return;
+    if (!find) {return;}
 
     // Get replace text
     const replace = await vscode.window.showInputBox({
@@ -836,7 +836,7 @@ export class WebMasterTools {
       ignoreFocusOut: true
     });
 
-    if (replace === undefined) return;
+    if (replace === undefined) {return;}
 
     // Get file pattern
     const filePattern = await vscode.window.showInputBox({
@@ -854,7 +854,7 @@ export class WebMasterTools {
       'Replace', 'Cancel'
     );
 
-    if (confirm !== 'Replace') return;
+    if (confirm !== 'Replace') {return;}
 
     // Execute
     vscode.window.withProgress({

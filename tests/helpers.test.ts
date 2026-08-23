@@ -1,42 +1,52 @@
-import { describe, it, expect } from 'vitest';
-import { normalizeRemotePath, sanitizeRelativePath, matchesPattern, isPathIgnored, formatFileSize } from '../src/utils/helpers';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { normalizeRemotePath, sanitizeRelativePath, matchesPattern, isPathIgnored, formatFileSize, resolveLocalRoot } from '../src/utils/helpers';
 
 describe('helpers', () => {
   it('normalizeRemotePath collapses slashes and backslashes', () => {
-    expect(normalizeRemotePath('\\var\\www//html//')).toBe('/var/www/html/');
+    assert.equal(normalizeRemotePath('\\var\\www//html//'), '/var/www/html/');
   });
 
   it('sanitizeRelativePath rejects path traversal', () => {
-    expect(() => sanitizeRelativePath('../secrets.txt')).toThrow();
-    expect(() => sanitizeRelativePath('..\\secrets.txt')).toThrow();
+    assert.throws(() => sanitizeRelativePath('../secrets.txt'));
+    assert.throws(() => sanitizeRelativePath('..\\secrets.txt'));
   });
 
   it('sanitizeRelativePath rejects absolute paths', () => {
-    expect(() => sanitizeRelativePath('/etc/passwd')).toThrow();
+    assert.throws(() => sanitizeRelativePath('/etc/passwd'));
   });
 
   it('matchesPattern supports double star', () => {
-    expect(matchesPattern('src/utils/helpers.ts', ['**/*.ts'])).toBe(true);
-    expect(matchesPattern('src/utils/helpers.ts', ['**/*.js'])).toBe(false);
+    assert.equal(matchesPattern('src/utils/helpers.ts', ['**/*.ts']), true);
+    assert.equal(matchesPattern('src/utils/helpers.ts', ['**/*.js']), false);
   });
 
   it('matches ignored folder descendants using Windows paths', () => {
-    expect(matchesPattern('storage\\logs\\app.log', ['storage/logs/**'])).toBe(true);
-    expect(matchesPattern('node_modules\\package\\index.js', ['node_modules'])).toBe(true);
-    expect(matchesPattern('src\\index.ts', ['storage/logs/**', 'node_modules'])).toBe(false);
+    assert.equal(matchesPattern('storage\\logs\\app.log', ['storage/logs/**']), true);
+    assert.equal(matchesPattern('node_modules\\package\\index.js', ['node_modules']), true);
+    assert.equal(matchesPattern('src\\index.ts', ['storage/logs/**', 'node_modules']), false);
   });
 
   it('fully ignores a directory, its contents, and matching basenames', () => {
     const patterns = ['storage/logs/**', '.env*', 'node_modules'];
-    expect(isPathIgnored('storage/logs', patterns)).toBe(true);
-    expect(isPathIgnored('storage/logs/archive/old.log', patterns)).toBe(true);
-    expect(isPathIgnored('packages/app/node_modules/lib/index.js', patterns)).toBe(true);
-    expect(isPathIgnored('config/.env.local', patterns)).toBe(true);
-    expect(isPathIgnored('storage/uploads/image.png', patterns)).toBe(false);
+    assert.equal(isPathIgnored('storage/logs', patterns), true);
+    assert.equal(isPathIgnored('storage/logs/archive/old.log', patterns), true);
+    assert.equal(isPathIgnored('packages/app/node_modules/lib/index.js', patterns), true);
+    assert.equal(isPathIgnored('config/.env.local', patterns), true);
+    assert.equal(isPathIgnored('storage/uploads/image.png', patterns), false);
   });
 
   it('formatFileSize formats bytes', () => {
-    expect(formatFileSize(0)).toBe('0 B');
-    expect(formatFileSize(1024)).toBe('1 KB');
+    assert.equal(formatFileSize(0), '0 B');
+    assert.equal(formatFileSize(1024), '1 KB');
+  });
+
+  it('resolves a configured local folder inside the workspace', () => {
+    assert.equal(resolveLocalRoot('C:\\workspace', 'public/assets'), 'C:\\workspace\\public\\assets');
+    assert.equal(resolveLocalRoot('C:\\workspace', '.'), 'C:\\workspace');
+  });
+
+  it('rejects a configured local folder outside the workspace', () => {
+    assert.throws(() => resolveLocalRoot('C:\\workspace', '../secrets'), /inside the workspace/);
   });
 });

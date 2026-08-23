@@ -12,7 +12,7 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
 
   const selectPrimaryConnectionCommand = vscode.commands.registerCommand('stackerftp.selectPrimaryConnection', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
     if (configs.length === 0) {
@@ -28,14 +28,14 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
       const isPrimary = primaryConfig && config.name === primaryConfig.name && config.host === primaryConfig.host;
 
       let icon = '$(primitive-square)'; // Default disconnected
-      if (isPrimary) icon = '$(star-full)';
-      else if (isConnected) icon = '$(star-empty)';
+      if (isPrimary) {icon = '$(star-full)';}
+      else if (isConnected) {icon = '$(star-empty)';}
 
       const description = `${config.protocol?.toUpperCase()} • ${config.username}@${config.host}`;
       let detail = 'Disconnected - Click to connect';
 
-      if (isPrimary) detail = 'Primary Connection - Click to manage';
-      else if (isConnected) detail = 'Connected - Click to set as Primary';
+      if (isPrimary) {detail = 'Primary Connection - Click to manage';}
+      else if (isConnected) {detail = 'Connected - Click to set as Primary';}
 
       return {
         label: `${icon} ${config.name || config.host}`,
@@ -64,7 +64,7 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
       title: `Connections (${activeConns.length} active)`
     });
 
-    if (!selected) return;
+    if (!selected) {return;}
 
     if (!selected.config) {
       // Disconnect all

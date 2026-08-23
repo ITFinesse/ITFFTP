@@ -146,12 +146,12 @@ export class ConfigManager {
 
   getActiveConfig(workspaceRoot: string): FTPConfig | undefined {
     const configs = this.getConfigs(workspaceRoot);
-    if (configs.length === 0) return undefined;
+    if (configs.length === 0) {return undefined;}
 
     const defaultHost = configs.find(config => config.default);
-    if (defaultHost) return defaultHost;
+    if (defaultHost) {return defaultHost;}
 
-    if (configs.length === 1) return configs[0];
+    if (configs.length === 1) {return configs[0];}
 
     // Multiple configs - check for profile
     const profile = this.currentProfile.get(workspaceRoot);
@@ -175,7 +175,7 @@ export class ConfigManager {
 
   private mergeWithProfile(config: FTPConfig, profileName: string): FTPConfig {
     const profile = config.profiles?.[profileName];
-    if (!profile) return config;
+    if (!profile) {return config;}
 
     return {
       ...config,
@@ -261,7 +261,6 @@ export class ConfigManager {
   }
 
   watchConfig(workspaceRoot: string, callback: () => void): vscode.FileSystemWatcher {
-    const configPath = this.getConfigPath(workspaceRoot);
     const pattern = new vscode.RelativePattern(workspaceRoot, path.join(CONFIG_DIR, CONFIG_FILE_NAME));
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
 

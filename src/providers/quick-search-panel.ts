@@ -7,13 +7,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
-import { transferManager } from '../core/transfer-manager';
-import { webMasterTools } from '../webmaster/tools';
 import { getWorkspaceRoot } from '../commands/utils';
-import { formatFileSize, normalizeRemotePath } from '../utils/helpers';
+import { formatFileSize } from '../utils/helpers';
 import { statusBar } from '../utils/status-bar';
 
 export class QuickSearchPanel {
@@ -99,14 +96,14 @@ export class QuickSearchPanel {
    * Change path from command (called from outside webview)
    */
   public static async changePathFromCommand(): Promise<void> {
-    if (!this._config) return;
+    if (!this._config) {return;}
 
     const input = await vscode.window.showInputBox({
       prompt: 'Enter remote path to search',
       value: this._searchPath || this._config.remotePath
     });
 
-    if (!input || !this._panel) return;
+    if (!input || !this._panel) {return;}
 
     this._searchPath = input;
     const label = input === this._config.remotePath ? 'Entire Remote' : path.basename(input);
@@ -189,7 +186,7 @@ export class QuickSearchPanel {
         }
 
         const item = queue.shift();
-        if (!item || item.depth > maxDepth) continue;
+        if (!item || item.depth > maxDepth) {continue;}
 
         activeRequests++;
 
@@ -251,7 +248,7 @@ export class QuickSearchPanel {
 
     // Sort: directories first, then by name
     results.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      if (a.type !== b.type) {return a.type === 'directory' ? -1 : 1;}
       return a.name.localeCompare(b.name);
     });
 
@@ -271,7 +268,7 @@ export class QuickSearchPanel {
    * Open file
    */
   private static async _openFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) return;
+    if (!this._workspaceRoot || !this._config) {return;}
 
     const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
     const localDir = path.dirname(localPath);
@@ -293,7 +290,7 @@ export class QuickSearchPanel {
    * Download file
    */
   private static async _downloadFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) return;
+    if (!this._workspaceRoot || !this._config) {return;}
 
     const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
     const localDir = path.dirname(localPath);
@@ -314,7 +311,7 @@ export class QuickSearchPanel {
    * Reveal in explorer
    */
   private static async _revealInExplorer(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) return;
+    if (!this._workspaceRoot || !this._config) {return;}
 
     const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
 

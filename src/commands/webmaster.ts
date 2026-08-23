@@ -12,10 +12,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const chmodCommand = vscode.commands.registerCommand('stackerftp.webmaster.chmod', async (item: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -27,10 +27,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const checksumCommand = vscode.commands.registerCommand('stackerftp.webmaster.checksum', async (item: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -39,7 +39,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
         { placeHolder: 'Select checksum algorithm' }
       ) as 'md5' | 'sha1' | 'sha256';
 
-      if (!algorithm) return;
+      if (!algorithm) {return;}
 
       const checksum = await webMasterTools.calculateRemoteChecksum(connection, item.entry.path, algorithm);
       await webMasterTools.showChecksumResult({ algorithm, remote: checksum }, item.entry.name);
@@ -55,10 +55,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     }
 
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = item.config || configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const localPick = await vscode.window.showOpenDialog({
@@ -68,7 +68,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
         canSelectMany: false
       });
 
-      if (!localPick || localPick.length === 0) return;
+      if (!localPick || localPick.length === 0) {return;}
 
       const connection = item.connectionRef || await connectionManager.ensureConnection(config);
       const result = await webMasterTools.compareChecksums(connection, localPick[0].fsPath, item.entry.path, 'md5');
@@ -80,10 +80,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const fileInfoCommand = vscode.commands.registerCommand('stackerftp.webmaster.fileInfo', async (item: any) => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -96,17 +96,17 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const searchCommand = vscode.commands.registerCommand('stackerftp.webmaster.search', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     const pattern = await vscode.window.showInputBox({
       prompt: 'Enter search pattern',
       placeHolder: 'search text'
     });
 
-    if (!pattern) return;
+    if (!pattern) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -140,7 +140,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     }
 
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     // Use item's config if available, otherwise get active config
     const config = item.config || configManager.getActiveConfig(workspaceRoot);
@@ -160,7 +160,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       placeHolder: `backup-${new Date().toISOString().split('T')[0]}`
     });
 
-    if (backupName === undefined) return; // User cancelled
+    if (backupName === undefined) {return;} // User cancelled
 
     try {
       const connection = item.connectionRef || await connectionManager.ensureConnection(config);
@@ -208,7 +208,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
               placeHolder: 'What would you like to compare?'
             });
 
-            if (!choice) return;
+            if (!choice) {return;}
 
             if (choice.value === 'workspace') {
               localPath = undefined; // Will use workspace root
@@ -226,10 +226,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const replaceCommand = vscode.commands.registerCommand('stackerftp.webmaster.replace', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -241,10 +241,10 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
   const purgeCacheCommand = vscode.commands.registerCommand('stackerftp.webmaster.purgeCache', async () => {
     const workspaceRoot = getWorkspaceRoot();
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const config = configManager.getActiveConfig(workspaceRoot);
-    if (!config) return;
+    if (!config) {return;}
 
     const choice = await vscode.window.showWarningMessage(
       'Purge remote cache directories?',
@@ -252,7 +252,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       'Yes', 'No'
     );
 
-    if (choice !== 'Yes') return;
+    if (choice !== 'Yes') {return;}
 
     try {
       const connection = await connectionManager.ensureConnection(config);
@@ -271,7 +271,9 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     backupCommand,
     compareFoldersCommand,
     replaceCommand,
-    purgeCacheCommand
+    purgeCacheCommand,
+    quickSearchCommand,
+    quickSearchChangePathCommand
   );
 
   return disposables;

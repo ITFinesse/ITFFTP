@@ -34,6 +34,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
   private queue: TransferItem[] = [];
   private active = false;
   private isProcessing = false;
+  private processingScheduled = false;
   private cancelled = false;
   private currentItem?: TransferItem;
   private sessionCollisionAction: 'ask' | 'overwrite' | 'skip' = 'ask';
@@ -41,16 +42,34 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
   private queueUpdateTimeout: NodeJS.Timeout | undefined;
   private _activeCount = 0;
   private completionResolve: (() => void) | null = null;
+  private wakeQueue?: () => void;
+  private readonly preferredConnections = new Map<string, BaseConnection>();
+  private readonly primaryTransfers = new Set<BaseConnection>();
   private transferHistory: TransferItem[] = [];
   private static readonly TRANSFER_TIMEOUT_MS = 180000; // 3 minutes safeguard against stalled transfers
 
 
-  private emitQueueUpdate(): void {
-    if (this.queueUpdateTimeout) return;
+  private emitQueueUpdate(immediate = false): void {
+    if (immediate) {
+      if (this.queueUpdateTimeout) {clearTimeout(this.queueUpdateTimeout);}
+      this.queueUpdateTimeout = undefined;
+      this.emit('queueUpdate', this.queue);
+      return;
+    }
+    if (this.queueUpdateTimeout) {return;}
     this.queueUpdateTimeout = setTimeout(() => {
       this.emit('queueUpdate', this.queue);
       this.queueUpdateTimeout = undefined;
     }, 150); // 150ms debounce for UI stability
+  }
+
+  private scheduleProcessing(): void {
+    if (this.active || this.processingScheduled) {return;}
+    this.processingScheduled = true;
+    queueMicrotask(() => {
+      this.processingScheduled = false;
+      void this.processQueue();
+    });
   }
 
   private withTransferTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
@@ -87,8 +106,8 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
 
     try {
       // Re-check after acquiring lock in case it was set to 'All' by another thread
-      if (this.sessionCollisionAction === 'overwrite') return 'overwrite';
-      if (this.sessionCollisionAction === 'skip') return 'skip';
+      if (this.sessionCollisionAction === 'overwrite') {return 'overwrite';}
+      if (this.sessionCollisionAction === 'skip') {return 'skip';}
 
       const location = type === 'local' ? 'Local' : 'Remote';
       const kind = isDir ? 'directory' : 'file';
@@ -145,12 +164,12 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       };
 
       this.queue.push(item);
+      this.preferredConnections.set(item.id, connection);
       this._activeCount++;
-      this.emitQueueUpdate();
+      this.emitQueueUpdate(true);
 
-      if (!this.active) {
-        this.processQueue();
-      }
+      if (this.active) {this.wakeQueue?.();}
+      else {this.scheduleProcessing();}
     });
   }
 
@@ -179,12 +198,12 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       };
 
       this.queue.push(item);
+      this.preferredConnections.set(item.id, connection);
       this._activeCount++;
-      this.emitQueueUpdate();
+      this.emitQueueUpdate(true);
 
-      if (!this.active) {
-        this.processQueue();
-      }
+      if (this.active) {this.wakeQueue?.();}
+      else {this.scheduleProcessing();}
     });
   }
 
@@ -193,7 +212,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
    * Each item stores its own config, ensuring transfers go to the correct server.
    */
   private async processQueue(): Promise<void> {
-    if (this.isProcessing) return;
+    if (this.isProcessing) {return;}
 
     this.isProcessing = true;
     this.active = true;
@@ -201,19 +220,22 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
 
     const concurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
     let activeTransfers = 0;
+    logger.info(`Transfer queue starting: ${this.queue.filter(item => item.status === 'pending').length} pending, concurrency ${concurrency}`);
 
     const processNext = async () => {
-      if (this.cancelled) return;
+      if (this.cancelled) {return;}
 
       const item = this.queue.find(i => i.status === 'pending');
-      if (!item) return;
+      if (!item) {return;}
 
       item.status = 'transferring';
       item.startTime = new Date();
       activeTransfers++;
+      logger.debug(`Transfer worker started: ${item.direction} ${item.remotePath} (${activeTransfers}/${concurrency} active)`);
       this.emit('transferStart', item);
 
       let pooledConnection: BaseConnection | undefined;
+      let usingPrimaryConnection = false;
       let progressConnection: BaseConnection | undefined;
       let transferProgressListener: ((progress: { filename: string; transferred: number; total: number; percentage: number }) => void) | undefined;
       let timedOut = false;
@@ -222,12 +244,21 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           throw new Error('Transfer item missing config - cannot determine target server');
         }
 
-        // Acquire a pooled connection for parallel transfers
-        pooledConnection = await connectionManager.getPooledConnection(item.config);
+        // Start the first transfer immediately on the authenticated primary
+        // session. Additional simultaneous workers acquire pooled sessions.
+        const preferredConnection = this.preferredConnections.get(item.id);
+        if (preferredConnection?.connected && !this.primaryTransfers.has(preferredConnection)) {
+          pooledConnection = preferredConnection;
+          usingPrimaryConnection = true;
+          this.primaryTransfers.add(preferredConnection);
+          logger.debug(`Transfer worker using active primary connection: ${item.remotePath}`);
+        } else {
+          pooledConnection = await connectionManager.getPooledConnection(item.config);
+        }
         const connection = pooledConnection;
         const expectedProgressPath = item.direction === 'upload' ? item.localPath : item.remotePath;
         transferProgressListener = (progress): void => {
-          if (progress.filename !== expectedProgressPath) return;
+          if (progress.filename !== expectedProgressPath) {return;}
           item.transferred = Math.max(0, Number(progress.transferred) || 0);
           const total = Math.max(0, Number(item.size) || Number(progress.total) || 0);
           item.progress = total > 0 ? Math.min(99, Math.round((item.transferred / total) * 100)) : 0;
@@ -270,7 +301,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
               remoteStat ??= await connection.stat(item.remotePath);
               const localStat = await fs.promises.stat(item.localPath);
               const remoteModify = remoteStat?.modifyTime instanceof Date ? remoteStat.modifyTime.getTime() : Number(remoteStat?.modifyTime || 0);
-              const remoteSize = Number.isFinite(item.size as number) ? item.size : remoteStat?.size;
+              const remoteSize = remoteStat?.size;
               targetsMatch = typeof remoteSize === 'number' && remoteSize === localStat.size;
               const localMs = localStat.mtime.getTime();
               const remoteTimestampUsable = item.config.protocol !== 'ftp'
@@ -366,7 +397,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
                 throw new Error('Cannot download a directory as a file. Please use Download Folder.');
               }
             } catch (e: any) {
-              if (e.message.includes('directory')) throw e;
+              if (e.message.includes('directory')) {throw e;}
             }
           }
 
@@ -389,14 +420,14 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
 
         item.status = 'completed';
         item.progress = 100;
-        if ((item as any).resolve) (item as any).resolve();
+        if ((item as any).resolve) {(item as any).resolve();}
       } catch (error: any) {
         const message = String(error?.message || error || 'Unknown transfer error');
         if (message.startsWith('Skipped:')) {
           item.status = 'completed';
           item.progress = 100;
           item.error = message;
-          if ((item as any).resolve) (item as any).resolve();
+          if ((item as any).resolve) {(item as any).resolve();}
           logger.debug(`Transfer skipped: ${item.remotePath}`, { reason: message });
         } else {
           if (error?.code === 'TRANSFER_TIMEOUT' || String(error?.message || '').includes('Transfer timeout')) {
@@ -405,7 +436,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           item.status = 'error';
           item.error = message;
           logger.error(`Transfer failed: ${item.remotePath}`, error);
-          if ((item as any).reject) (item as any).reject(error);
+          if ((item as any).reject) {(item as any).reject(error);}
         }
       } finally {
         if (progressConnection && transferProgressListener) {
@@ -423,9 +454,12 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
           }
         }
         // Release pooled connection back to pool
-        if (pooledConnection && item.config) {
+        if (usingPrimaryConnection && pooledConnection) {
+          this.primaryTransfers.delete(pooledConnection);
+        } else if (pooledConnection && item.config) {
           connectionManager.releasePooledConnection(item.config, pooledConnection);
         }
+        this.preferredConnections.delete(item.id);
         item.endTime = new Date();
         if (item.status === 'completed') {
           this.recordCompletedTransfer(item);
@@ -454,25 +488,22 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
       }
     };
 
+    const spawnAvailableWorkers = (): void => {
+      const slotsAvailable = Math.max(0, concurrency - activeTransfers);
+      const count = Math.min(slotsAvailable, this.queue.filter(item => item.status === 'pending').length);
+      for (let index = 0; index < count; index++) {void processNext();}
+    };
+
     try {
-      // Start initial batch
-      const initialPromises = [];
-      const count = Math.min(concurrency, this.queue.filter(i => i.status === 'pending').length);
-
-      for (let i = 0; i < count; i++) {
-        initialPromises.push(processNext());
-      }
-
-      await Promise.all(initialPromises);
-
-      // Wait for any remaining in-flight transfers to complete
-      if (activeTransfers > 0 || this.queue.some(i => i.status === 'pending')) {
-        await new Promise<void>(resolve => {
-          this.completionResolve = resolve;
-        });
-      }
-
+      await new Promise<void>(resolve => {
+        this.completionResolve = resolve;
+        this.wakeQueue = spawnAvailableWorkers;
+        spawnAvailableWorkers();
+        if (activeTransfers === 0 && !this.queue.some(item => item.status === 'pending')) {resolve();}
+      });
     } finally {
+      this.wakeQueue = undefined;
+      this.completionResolve = null;
       this.isProcessing = false;
       this.active = false;
       this.emit('queueComplete');
@@ -501,10 +532,10 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     let totalDurationMs = 0;
 
     for (const item of this.transferHistory) {
-      if (!item.endTime) continue;
+      if (!item.endTime) {continue;}
       const date = item.endTime.toISOString().slice(0, 10);
       const entry = byDate.get(date);
-      if (!entry) continue;
+      if (!entry) {continue;}
       const size = Math.max(0, item.size || item.transferred || 0);
       const duration = item.startTime ? Math.max(0, item.endTime.getTime() - item.startTime.getTime()) : 0;
       totalDurationMs += duration;
@@ -566,7 +597,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     statusBar.info(`Adding ${files.length} files to queue...`);
 
     const filePromises = files.map(async (file) => {
-      if (this.cancelled) return;
+      if (this.cancelled) {return;}
 
       const relativePath = path.relative(localPath, file);
       const remoteFilePath = normalizeRemotePath(path.join(remotePath, relativePath));
@@ -635,7 +666,7 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     statusBar.info(`Adding ${dataFiles.length} files to queue...`);
 
     const filePromises = dataFiles.map(async (file) => {
-      if (this.cancelled) return;
+      if (this.cancelled) {return;}
 
       const relativePath = path.relative(remotePath, file.path);
       const localFilePath = path.join(localPath, relativePath);
@@ -707,16 +738,16 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     const MAX_DEPTH = 50;
 
     const traverse = async (currentDir: string, depth: number) => {
-      if (depth > MAX_DEPTH || files.length >= MAX_FILES) return;
+      if (depth > MAX_DEPTH || files.length >= MAX_FILES) {return;}
 
       const entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
       const subdirs: string[] = [];
 
       for (const entry of entries) {
-        if (files.length >= MAX_FILES) break;
+        if (files.length >= MAX_FILES) {break;}
         const fullPath = path.join(currentDir, entry.name);
         const relativePath = path.relative(dir, fullPath);
-        if (isPathIgnored(relativePath, ignorePatterns)) continue;
+        if (isPathIgnored(relativePath, ignorePatterns)) {continue;}
 
         if (entry.isDirectory()) {
           subdirs.push(fullPath);
@@ -743,16 +774,16 @@ export class TransferManager extends EventEmitter implements vscode.Disposable {
     const normalizedRoot = normalizeRemotePath(remotePath).replace(/\/+$/g, '');
 
     const traverse = async (currentPath: string, depth: number) => {
-      if (depth > MAX_DEPTH || files.length >= MAX_FILES) return;
+      if (depth > MAX_DEPTH || files.length >= MAX_FILES) {return;}
 
       const entries = await connection.list(currentPath);
       const subdirs: string[] = [];
 
       for (const entry of entries) {
-        if (files.length >= MAX_FILES) break;
+        if (files.length >= MAX_FILES) {break;}
         const fullPath = normalizeRemotePath(path.join(currentPath, entry.name));
         const relativePath = fullPath.startsWith(`${normalizedRoot}/`) ? fullPath.slice(normalizedRoot.length + 1) : entry.name;
-        if (isPathIgnored(relativePath, ignorePatterns)) continue;
+        if (isPathIgnored(relativePath, ignorePatterns)) {continue;}
 
         if (entry.type === 'directory') {
           files.push({ ...entry, path: fullPath });

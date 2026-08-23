@@ -3,7 +3,7 @@
  */
 
 import { EventEmitter } from 'events';
-import { FileEntry, FTPConfig, ConnectionStatus, FilePermissions } from '../types';
+import { FileEntry, FTPConfig, ConnectionStatus } from '../types';
 
 export interface TransferProgress {
   filename: string;

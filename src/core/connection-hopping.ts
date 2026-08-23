@@ -6,6 +6,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { Client } from 'ssh2';
 import { FTPConfig, HopConfig } from '../types';
 import { logger } from '../utils/logger';
@@ -57,7 +58,6 @@ export class ConnectionHopping {
 
       if (config.privateKeyPath) {
         try {
-          const fs = require('fs');
           connectConfig.privateKey = fs.readFileSync(config.privateKeyPath);
           if (config.passphrase) {
             connectConfig.passphrase = config.passphrase;
@@ -102,7 +102,6 @@ export class ConnectionHopping {
 
         if (target.privateKeyPath) {
           try {
-            const fs = require('fs');
             connectConfig.privateKey = fs.readFileSync(target.privateKeyPath);
             if (target.passphrase) {
               connectConfig.passphrase = target.passphrase;
@@ -177,12 +176,12 @@ export class ConnectionHopping {
       prompt: 'Enter the hop server hostname or IP',
       ignoreFocusOut: true,
       validateInput: (value) => {
-        if (!value?.trim()) return 'Host is required';
+        if (!value?.trim()) {return 'Host is required';}
         return null;
       }
     });
 
-    if (!host) return undefined;
+    if (!host) {return undefined;}
 
     // Port
     const portStr = await vscode.window.showInputBox({
@@ -199,7 +198,7 @@ export class ConnectionHopping {
       }
     });
 
-    if (portStr === undefined) return undefined;
+    if (portStr === undefined) {return undefined;}
 
     // Username
     const username = await vscode.window.showInputBox({
@@ -208,12 +207,12 @@ export class ConnectionHopping {
       prompt: 'Enter the username for the hop server',
       ignoreFocusOut: true,
       validateInput: (value) => {
-        if (!value?.trim()) return 'Username is required';
+        if (!value?.trim()) {return 'Username is required';}
         return null;
       }
     });
 
-    if (!username) return undefined;
+    if (!username) {return undefined;}
 
     // Authentication method
     const authMethod = await vscode.window.showQuickPick(
@@ -227,7 +226,7 @@ export class ConnectionHopping {
       }
     );
 
-    if (!authMethod) return undefined;
+    if (!authMethod) {return undefined;}
 
     let password: string | undefined;
     let privateKeyPath: string | undefined;
@@ -252,7 +251,7 @@ export class ConnectionHopping {
         }
       });
 
-      if (!keyFiles || keyFiles.length === 0) return undefined;
+      if (!keyFiles || keyFiles.length === 0) {return undefined;}
       privateKeyPath = keyFiles[0].fsPath;
 
       const hasPassphrase = await vscode.window.showQuickPick(

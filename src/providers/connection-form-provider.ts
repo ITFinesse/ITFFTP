@@ -5,8 +5,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { FTPConfig, Protocol } from '../types';
@@ -30,7 +28,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
-    context: vscode.WebviewViewResolveContext,
+    _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
@@ -149,14 +147,14 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
     const picked = await vscode.window.showWorkspaceFolderPick({
       placeHolder: 'Select workspace folder for SFTP config'
     });
-    if (!picked) return undefined;
+    if (!picked) {return undefined;}
 
     this._selectedWorkspaceRoot = picked.uri.fsPath;
     return this._selectedWorkspaceRoot;
   }
 
   private async _sendConfigs() {
-    if (!this._view) return;
+    if (!this._view) {return;}
 
     const workspaceRoot = await this._resolveWorkspaceRoot(false);
     if (!workspaceRoot) {
@@ -207,7 +205,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
     try {
       statusBar.info('Saving connection configuration...');
       await configManager.loadConfig(workspaceRoot);
-      let configs = configManager.getConfigs(workspaceRoot);
+      const configs = configManager.getConfigs(workspaceRoot);
 
       // Get existing config if editing to preserve all fields
       const existingConfig = (editIndex !== undefined && editIndex >= 0)
@@ -253,10 +251,10 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
   private async _handleDeleteConfig(index: number) {
     const workspaceRoot = await this._resolveWorkspaceRoot(true);
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
-    if (typeof index !== 'number' || index < 0 || index >= configs.length) return;
+    if (typeof index !== 'number' || index < 0 || index >= configs.length) {return;}
 
     const config = configs[index];
     const confirm = await vscode.window.showWarningMessage(
@@ -265,7 +263,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       'Delete', 'Cancel'
     );
 
-    if (confirm !== 'Delete') return;
+    if (confirm !== 'Delete') {return;}
 
     configs.splice(index, 1);
     await configManager.saveConfig(workspaceRoot, configs);
@@ -305,10 +303,10 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
   private async _handleConnect(index: number) {
     const workspaceRoot = await this._resolveWorkspaceRoot(true);
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
-    if (typeof index !== 'number' || index < 0 || index >= configs.length) return;
+    if (typeof index !== 'number' || index < 0 || index >= configs.length) {return;}
 
     try {
       await connectionManager.connect(configs[index]);
@@ -334,10 +332,10 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
   private async _handleDisconnect(index: number) {
     const workspaceRoot = await this._resolveWorkspaceRoot(true);
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
-    if (typeof index !== 'number' || index < 0 || index >= configs.length) return;
+    if (typeof index !== 'number' || index < 0 || index >= configs.length) {return;}
 
     try {
       await connectionManager.disconnect(configs[index]);
@@ -352,10 +350,10 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
   private async _handleEditConfig(index: number) {
     const workspaceRoot = await this._resolveWorkspaceRoot(true);
-    if (!workspaceRoot) return;
+    if (!workspaceRoot) {return;}
 
     const configs = configManager.getConfigs(workspaceRoot);
-    if (typeof index !== 'number' || index < 0 || index >= configs.length) return;
+    if (typeof index !== 'number' || index < 0 || index >= configs.length) {return;}
 
     this._editingConfig = configs[index];
     this._editingIndex = index;

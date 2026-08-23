@@ -2,11 +2,13 @@ const vscode = acquireVsCodeApi();
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const settingIds = ['autoConnect', 'autoReconnect', 'autoRefresh', 'showHiddenFiles', 'confirmDelete', 'confirmSync', 'showWebMasterTools', 'enableFileWatcher', 'defaultSyntaxHighlighting', 'useNativeTreeView', 'downloadWhenOpenInRemoteExplorer'];
-const panelCopy = { hosts: ['Hosts', 'Manage remote locations and choose the workspace default.'], settings: ['Settings', 'Compact workspace-wide transfer and explorer preferences.'], ignores: ['Ignores', 'Move workspace files between transfer scope and ignored patterns.'], diff: ['Diff Viewer', 'Compare matching local and remote paths in one tree.'], analytics: ['Analytics', 'Transfer activity recorded for this workspace.'] };
+const panelCopy = { hosts: ['Hosts', 'Manage remote locations and choose the workspace default.'], settings: ['Settings', 'Compact workspace-wide transfer and explorer preferences.'], ignores: ['Ignores', 'Move workspace files between transfer scope and ignored patterns.'], diff: ['Transfer', 'Compare matching local and remote folders, then transfer verified changes.'], analytics: ['Analytics', 'Transfer activity recorded for this workspace.'] };
 
 let profiles = [], selectedIndex = -1, workspaceFiles = [], selectedWorkspacePath = '', selectedIgnoredPattern = '';
 let settingsLoaded = false, saveTimer, selectedPath = '', selectedSide = 'local';
-const diff = { records: new Map(), collapsed: new Set(), localContent: '', remoteContent: '' };
+const diff = { records: new Map(), collapsed: new Set(), loadedFolders: new Set(['']), loadingFolders: new Set(), localContent: undefined, remoteContent: undefined };
+let folderPicker;
+let folderPickerOutsideHandler;
 const getProfile = () => selectedIndex >= 0 ? profiles[selectedIndex] : undefined;
 const labelFor = (profile, index) => profile.name || profile.host || `Host ${index + 1}`;
 
@@ -19,27 +21,28 @@ function setPanel(name) {
   document.querySelectorAll('[data-panel-content]').forEach(node => node.classList.toggle('hidden', node.dataset.panelContent !== name));
   document.querySelectorAll('[data-panel]').forEach(node => node.classList.toggle('is-active', node.dataset.panel === name));
   $('pageTitle').textContent = panelCopy[name][0]; $('pageDescription').textContent = panelCopy[name][1];
-  if (name === 'diff' && !diff.records.size) refreshDiff();
+  if (name === 'diff' && !diff.records.size) refreshDiff(false);
 }
 function autoSyncFor(profile) { return profile.uploadOnSave && profile.downloadOnOpen ? 'both' : profile.uploadOnSave ? 'upload' : profile.downloadOnOpen ? 'download' : 'off'; }
 function renderHosts() {
   $('hostCount').textContent = `${profiles.length} host${profiles.length === 1 ? '' : 's'}`;
   $('hostList').innerHTML = profiles.length ? profiles.map((profile, index) => `<button class="host-row ${index === selectedIndex ? 'is-selected' : ''}" type="button" data-host="${index}"><span class="host-status"></span><span class="host-name">${esc(labelFor(profile, index))}${profile.default ? '<span class="default-tag">Default</span>' : ''}</span><span class="host-meta">${esc(profile.host || 'Host not set')} / ${esc(profile.username || 'User not set')}</span><span class="host-protocol">${esc(profile.protocol || 'sftp')}</span></button>`).join('') : '<div class="host-empty">No remote locations yet. Add a host to begin.</div>';
-  $('hostList').querySelectorAll('[data-host]').forEach(node => node.addEventListener('click', () => { selectedIndex = Number(node.dataset.host); renderHosts(); renderIgnoreEditor(); }));
+  $('hostList').querySelectorAll('[data-host]').forEach(node => node.addEventListener('click', () => { const nextIndex = Number(node.dataset.host); const changed = nextIndex !== selectedIndex; selectedIndex = nextIndex; if (changed) { diff.records.clear(); diff.loadedFolders = new Set(['']); diff.loadingFolders.clear(); selectedPath = ''; hideFileDiff(); } renderHosts(); renderIgnoreEditor(); updateRootFields(); }));
   renderHostEditor();
 }
 function renderHostEditor() {
-  const profile = getProfile(); const ids = ['hostName', 'hostProtocol', 'hostAddress', 'hostUsername', 'hostPassword', 'hostPort', 'hostRemotePath', 'hostCollisionPolicy', 'hostSyncMode', 'hostAutoSync', 'hostDefault'];
+  const profile = getProfile(); const ids = ['hostName', 'hostProtocol', 'hostAddress', 'hostUsername', 'hostPassword', 'hostPort', 'hostLocalPath', 'hostRemotePath', 'hostCollisionPolicy', 'hostSyncMode', 'hostAutoSync', 'hostDefault'];
   ids.forEach(id => { $(id).disabled = !profile; }); $('btnTestHost').classList.toggle('hidden', !profile); $('btnDeleteHost').classList.toggle('hidden', !profile);
+  document.querySelectorAll('[data-folder-picker^="host-"]').forEach(button => { button.disabled = !profile; });
   $('editorTitle').textContent = profile ? labelFor(profile, selectedIndex) : 'Select a host'; $('editorNote').textContent = profile ? 'Changes save automatically after two seconds.' : 'Choose a remote location or add a new one.';
   if (!profile) return;
-  $('hostName').value = profile.name || ''; $('hostProtocol').value = profile.protocol || 'sftp'; $('hostAddress').value = profile.host || ''; $('hostUsername').value = profile.username || ''; $('hostPassword').value = profile.password || ''; $('hostPort').value = profile.port || ''; $('hostRemotePath').value = profile.remotePath || '/'; $('hostCollisionPolicy').value = profile.collisionPolicy || 'ask'; $('hostSyncMode').value = profile.syncMode || 'update'; $('hostAutoSync').value = autoSyncFor(profile); $('hostDefault').checked = Boolean(profile.default);
+  $('hostName').value = profile.name || ''; $('hostProtocol').value = profile.protocol || 'sftp'; $('hostAddress').value = profile.host || ''; $('hostUsername').value = profile.username || ''; $('hostPassword').value = profile.password || ''; $('hostPort').value = profile.port || ''; $('hostLocalPath').value = profile.localPath || '.'; $('hostRemotePath').value = profile.remotePath || '/'; $('hostCollisionPolicy').value = profile.collisionPolicy || 'ask'; $('hostSyncMode').value = profile.syncMode || 'update'; $('hostAutoSync').value = autoSyncFor(profile); $('hostDefault').checked = Boolean(profile.default);
 }
 function updateProfile() {
   const profile = getProfile(); if (!profile) return;
   profile.name = $('hostName').value.trim() || undefined; profile.protocol = $('hostProtocol').value; profile.host = $('hostAddress').value.trim(); profile.username = $('hostUsername').value.trim(); profile.password = $('hostPassword').value || undefined;
-  const port = Number($('hostPort').value); profile.port = Number.isInteger(port) && port > 0 ? port : undefined; profile.remotePath = $('hostRemotePath').value.trim() || '/'; profile.collisionPolicy = $('hostCollisionPolicy').value; profile.syncMode = $('hostSyncMode').value;
-  const mode = $('hostAutoSync').value; profile.uploadOnSave = mode === 'upload' || mode === 'both'; profile.downloadOnOpen = mode === 'download' || mode === 'both'; profile.watcher = profile.uploadOnSave ? { ...(typeof profile.watcher === 'object' ? profile.watcher : {}), files: typeof profile.watcher === 'object' && profile.watcher.files ? profile.watcher.files : '**/*', autoUpload: true, autoDelete: typeof profile.watcher === 'object' ? Boolean(profile.watcher.autoDelete) : false } : false; if (profile.uploadOnSave) $('enableFileWatcher').checked = true;
+  const port = Number($('hostPort').value); profile.port = Number.isInteger(port) && port > 0 ? port : undefined; profile.localPath = $('hostLocalPath').value.trim().replace(/^\.\/?$/, '') || undefined; profile.remotePath = $('hostRemotePath').value.trim() || '/'; profile.collisionPolicy = $('hostCollisionPolicy').value; profile.syncMode = $('hostSyncMode').value;
+  const mode = $('hostAutoSync').value; profile.uploadOnSave = mode === 'upload' || mode === 'both'; profile.downloadOnOpen = mode === 'download' || mode === 'both'; profile.watcher = profile.uploadOnSave ? { ...(typeof profile.watcher === 'object' ? profile.watcher : {}), files: typeof profile.watcher === 'object' && profile.watcher.files ? profile.watcher.files : '**/*', autoUpload: true, autoDelete: typeof profile.watcher === 'object' ? Boolean(profile.watcher.autoDelete) : false } : false; if (mode !== 'off') $('enableFileWatcher').checked = true;
   if ($('hostDefault').checked) profiles.forEach((candidate, index) => { candidate.default = index === selectedIndex; }); else profile.default = false;
 }
 function isIgnored(path, patterns) {
@@ -66,41 +69,79 @@ function scheduleSave() { if (!settingsLoaded) return; clearTimeout(saveTimer); 
 function setSettings(settings) {
   settingIds.forEach(id => { if ($(id)) $(id).checked = Boolean(settings[id]); }); $('transferConcurrency').max = '100'; $('transferConcurrency').value = settings.transferConcurrency || 4; $('dashboardZoom').value = settings.dashboardZoom || 110; applyDashboardZoom(settings.dashboardZoom || 110); $('remoteExplorerSortOrder').value = settings.remoteExplorerSortOrder || 'name';
   try { const parsed = JSON.parse(settings.connections || '[]'); profiles = Array.isArray(parsed) ? parsed : parsed ? [parsed] : []; } catch { profiles = []; toast('Unable to read connection profiles.', 'error'); }
-  selectedIndex = profiles.length ? 0 : -1; $('diffRemoteRoot').value = getProfile()?.remotePath || '/'; renderHosts(); renderIgnoreEditor(); updateAnalytics(settings.analytics || {});
+  selectedIndex = profiles.length ? 0 : -1; updateRootFields(); renderHosts(); renderIgnoreEditor(); updateAnalytics(settings.analytics || {});
 }
 
-function treeRecords() {
-  const changedOnly = $('diffChangedOnly').checked; const records = [...diff.records.values()];
-  const visible = new Set(records.filter(record => !changedOnly || record.status !== 'same').map(record => record.path));
+function updateRootFields() { const profile = getProfile(); $('diffLocalRoot').value = profile?.localPath || '.'; $('diffRemoteRoot').value = profile?.remotePath || '/'; }
+
+function formatTreeSize(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0)} MB`;
+  return `${(bytes / 1073741824).toFixed(1)} GB`;
+}
+function buildDiffTreeModel() {
+  const records = [...diff.records.values()]; const changedFolders = new Set(); const sizes = { local: new Map(), remote: new Map() };
+  records.forEach(record => {
+    let parent = record.path.includes('/') ? record.path.slice(0, record.path.lastIndexOf('/')) : '';
+    if (record.status !== 'same') while (parent) { changedFolders.add(parent); parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : ''; }
+    if (record.type !== 'file') return;
+    ['local', 'remote'].forEach(side => {
+      if (!record[side]) return;
+      let folder = record.path.includes('/') ? record.path.slice(0, record.path.lastIndexOf('/')) : '';
+      while (folder) { sizes[side].set(folder, (sizes[side].get(folder) || 0) + (Number(record[side].size) || 0)); folder = folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : ''; }
+    });
+  });
+  return { records, changedFolders, sizes };
+}
+function displayedDiffStatus(record, model) {
+  if (record.type === 'directory' && record.status === 'same') {
+    if (model.changedFolders.has(record.path)) return 'modified';
+    if (!diff.loadedFolders.has(record.path)) return 'unscanned';
+  }
+  return record.status;
+}
+function treeRecords(model) {
+  const changedOnly = $('diffChangedOnly').checked; const records = model.records;
+  const visible = new Set(records.filter(record => !changedOnly || displayedDiffStatus(record, model) !== 'same').map(record => record.path));
   for (const path of [...visible]) { let parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''; while (parent) { visible.add(parent); parent = parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : ''; } }
   return records.filter(record => visible.has(record.path));
 }
-function renderDiffTree(side) {
+function renderDiffTree(side, model, visibleRecords) {
   const children = new Map([['', []]]);
-  treeRecords().forEach(record => { const parent = record.path.includes('/') ? record.path.slice(0, record.path.lastIndexOf('/')) : ''; if (!children.has(parent)) children.set(parent, []); children.get(parent).push(record); });
+  visibleRecords.forEach(record => { const parent = record.path.includes('/') ? record.path.slice(0, record.path.lastIndexOf('/')) : ''; if (!children.has(parent)) children.set(parent, []); children.get(parent).push(record); });
   const rows = [];
   const addChildren = (parent, depth) => {
     const entries = (children.get(parent) || []).sort((left, right) => left.type === right.type ? left.path.localeCompare(right.path) : left.type === 'directory' ? -1 : 1);
     for (const record of entries) {
     const parts = record.path.split('/');
-    const folder = record.type === 'directory'; const present = side === 'local' ? record.local : record.remote; const state = present ? record.status : (side === 'local' ? 'missing-local' : 'missing-remote');
+    const folder = record.type === 'directory'; const present = side === 'local' ? record.local : record.remote; const state = present ? displayedDiffStatus(record, model) : (side === 'local' ? 'missing-local' : 'missing-remote');
+    const size = present ? (folder ? model.sizes[side].get(record.path) || 0 : Number(present.size) || 0) : undefined;
+    const hasKnownChildren = folder && [...diff.records.keys()].some(path => path.startsWith(`${record.path}/`));
+    const expanded = folder && !diff.collapsed.has(record.path) && (diff.loadedFolders.has(record.path) || hasKnownChildren);
     const age = record.status === 'modified' && record.newer ? (record.newer === side ? 'is-newer' : 'is-older') : '';
-    rows.push(`<button type="button" role="treeitem" class="file-row ${folder ? 'is-folder' : 'is-file'} ${selectedPath === record.path && selectedSide === side ? 'is-selected' : ''} ${present ? '' : 'is-placeholder'} status-${esc(state)} ${age}" data-path="${esc(record.path)}" data-side="${side}" data-folder="${folder ? 'true' : ''}" style="padding-left:${12 + depth * 16}px"><span class="codicon ${folder ? (diff.collapsed.has(record.path) ? 'codicon-chevron-right' : 'codicon-chevron-down') : 'codicon-file'}"></span><span class="tree-name">${esc(parts.at(-1))}</span><span class="file-status ${esc(state)}">${present ? esc(state.replace('-', ' ')) : side === 'local' ? 'missing locally' : 'missing remotely'}</span></button>`);
-    if (folder && !diff.collapsed.has(record.path)) addChildren(record.path, depth + 1);
+    const stateLabel = state === 'unscanned' ? 'open to compare' : state.replace('-', ' ');
+    rows.push(`<button type="button" role="treeitem" class="file-row ${folder ? 'is-folder' : 'is-file'} ${selectedPath === record.path && selectedSide === side ? 'is-selected' : ''} ${present ? '' : 'is-placeholder'} status-${esc(state)} ${age}" data-path="${esc(record.path)}" data-side="${side}" data-folder="${folder ? 'true' : ''}" style="padding-left:${12 + depth * 16}px"><span class="codicon ${folder ? (diff.loadingFolders.has(record.path) ? 'codicon-loading codicon-modifier-spin' : expanded ? 'codicon-chevron-down' : 'codicon-chevron-right') : 'codicon-file'}"></span><span class="tree-name">${esc(parts.at(-1))}</span><span class="file-size">${size === undefined ? '—' : formatTreeSize(size)}</span><span class="file-status ${esc(state)}">${present ? esc(stateLabel) : side === 'local' ? 'missing locally' : 'missing remotely'}</span></button>`);
+    if (expanded) addChildren(record.path, depth + 1);
     }
   }
   addChildren('', 0);
   return rows.length ? rows.join('') : '<div class="empty-state">No changed paths match this filter.</div>';
 }
 function renderDiff() {
-  const count = treeRecords().length; $('diffLocalCount').textContent = `${count} paths`; $('diffRemoteCount').textContent = `${count} paths`; $('diffLocalList').innerHTML = renderDiffTree('local'); $('diffRemoteList').innerHTML = renderDiffTree('remote');
+  const model = buildDiffTreeModel(); const visibleRecords = treeRecords(model); const count = visibleRecords.length; $('diffLocalCount').textContent = `${count} paths`; $('diffRemoteCount').textContent = `${count} paths`; $('diffLocalList').innerHTML = renderDiffTree('local', model, visibleRecords); $('diffRemoteList').innerHTML = renderDiffTree('remote', model, visibleRecords);
+  const selectedRecord = diff.records.get(selectedPath); const selectedFile = selectedRecord?.type === 'file'; if ($('btnViewDiff')) $('btnViewDiff').disabled = !selectedFile; $('btnUploadDiff').disabled = !selectedRecord?.local; $('btnDownloadDiff').disabled = !selectedRecord?.remote;
   document.querySelectorAll('#diffLocalList [data-path], #diffRemoteList [data-path]').forEach(node => {
-    node.addEventListener('click', () => { const path = node.dataset.path; const side = node.dataset.side; selectedPath = path; selectedSide = side; if (node.dataset.folder === 'true') { diff.collapsed.has(path) ? diff.collapsed.delete(path) : diff.collapsed.add(path); } else requestFileDiff(path); renderDiff(); });
+    node.addEventListener('click', () => { const path = node.dataset.path; const side = node.dataset.side; if (path !== selectedPath) hideFileDiff(); selectedPath = path; selectedSide = side; if (node.dataset.folder === 'true') { const known = diff.loadedFolders.has(path) || [...diff.records.keys()].some(candidate => candidate.startsWith(`${path}/`)); if (diff.loadingFolders.has(path)) return; if (!known) { diff.collapsed.delete(path); diff.loadingFolders.add(path); vscode.postMessage({ type: 'loadDiffFolder', path, connection: getProfile() }); } else { diff.collapsed.has(path) ? diff.collapsed.delete(path) : diff.collapsed.add(path); } } renderDiff(); });
+    node.addEventListener('dblclick', () => { if (node.dataset.folder !== 'true') requestFileDiff(node.dataset.path); });
     node.addEventListener('contextmenu', event => { event.preventDefault(); selectedPath = node.dataset.path; selectedSide = node.dataset.side; renderDiff(); showContext(event.clientX, event.clientY, selectedPath, selectedSide, node.dataset.folder === 'true'); });
   });
 }
-function refreshDiff() { diff.records.clear(); $('diffFileView').replaceChildren(); vscode.postMessage({ type: 'loadDiffRemote', connection: getProfile(), force: true }); }
-function requestFileDiff(path) { diff.localContent = ''; diff.remoteContent = ''; vscode.postMessage({ type: 'readDiffFile', direction: 'local', path, connection: getProfile() }); vscode.postMessage({ type: 'readDiffFile', direction: 'remote', path, connection: getProfile() }); }
+function hideFileDiff() { diff.localContent = undefined; diff.remoteContent = undefined; $('diffFileView').replaceChildren(); document.querySelector('[data-panel-content="diff"]')?.classList.remove('has-file-diff'); }
+function closeFileDiff() { hideFileDiff(); selectedPath = ''; renderDiff(); }
+function refreshDiff(force = true) { if (force) { diff.records.clear(); diff.loadedFolders = new Set(['']); diff.loadingFolders.clear(); closeFileDiff(); } vscode.postMessage({ type: 'loadDiffRemote', connection: getProfile(), force }); }
+function requestFileDiff(path) { diff.localContent = undefined; diff.remoteContent = undefined; document.querySelector('[data-panel-content="diff"]')?.classList.add('has-file-diff'); vscode.postMessage({ type: 'readDiffFile', direction: 'local', path, connection: getProfile() }); vscode.postMessage({ type: 'readDiffFile', direction: 'remote', path, connection: getProfile() }); }
 function alignedLineDiff(localText, remoteText) {
   const left = String(localText).replace(/\r\n/g, '\n').split('\n'); const right = String(remoteText).replace(/\r\n/g, '\n').split('\n');
   const operations = []; const cells = (left.length + 1) * (right.length + 1);
@@ -130,22 +171,61 @@ function alignedLineDiff(localText, remoteText) {
 function diffCell(side, text, line, type) { const changed = type === 'replace' || (side === 'local' ? type === 'delete' : type === 'insert'); return `<div class="diff-code-cell ${changed ? side === 'local' ? 'diff-removed' : 'diff-added' : ''}"><span class="diff-line-number">${line}</span><code>${text === undefined ? '' : esc(text) || ' '}</code></div>`; }
 function renderFileDiff() {
   if (!selectedPath) return;
-  if (!diff.localContent || !diff.remoteContent) { $('diffFileView').innerHTML = `<div class="diff-file-heading"><h3>Diff file view <span>${esc(selectedPath)}</span></h3></div><div class="diff-loading">Loading both files…</div>`; return; }
+  if (diff.localContent === undefined || diff.remoteContent === undefined) { $('diffFileView').innerHTML = `<div class="diff-file-heading"><h3>Diff file view <span>${esc(selectedPath)}</span></h3><button class="icon-button diff-close" type="button" aria-label="Close file diff" title="Close file diff"><span class="codicon codicon-close"></span></button></div><div class="diff-loading">Loading both files…</div>`; $('diffFileView').querySelector('.diff-close')?.addEventListener('click', closeFileDiff); return; }
   const rows = alignedLineDiff(diff.localContent, diff.remoteContent); const changed = rows.filter(row => row.type !== 'equal').length;
-  $('diffFileView').innerHTML = `<div class="diff-file-heading"><h3>Diff file view <span>${esc(selectedPath)}</span></h3><span>${changed ? `${changed} changed line${changed === 1 ? '' : 's'}` : 'Files are identical'}</span></div><div class="diff-editor-header"><strong>Local</strong><strong>Remote</strong></div><div class="diff-editor-body"><div class="diff-code-pane" data-diff-pane="local">${rows.map(row => diffCell('local', row.left, row.leftLine, row.type)).join('')}</div><div class="diff-code-pane" data-diff-pane="remote">${rows.map(row => diffCell('remote', row.right, row.rightLine, row.type)).join('')}</div></div>`;
+  $('diffFileView').innerHTML = `<div class="diff-file-heading"><h3>Diff file view <span>${esc(selectedPath)}</span></h3><span>${changed ? `${changed} changed line${changed === 1 ? '' : 's'}` : 'Files are identical'}</span><button class="icon-button diff-close" type="button" aria-label="Close file diff" title="Close file diff"><span class="codicon codicon-close"></span></button></div><div class="diff-editor-header"><strong>Local</strong><strong>Remote</strong></div><div class="diff-editor-body"><div class="diff-code-pane" data-diff-pane="local">${rows.map(row => diffCell('local', row.left, row.leftLine, row.type)).join('')}</div><div class="diff-code-pane" data-diff-pane="remote">${rows.map(row => diffCell('remote', row.right, row.rightLine, row.type)).join('')}</div></div>`;
+  $('diffFileView').querySelector('.diff-close')?.addEventListener('click', closeFileDiff);
   const panes = [...$('diffFileView').querySelectorAll('[data-diff-pane]')]; let syncing = false; panes.forEach((pane, index) => pane.addEventListener('scroll', () => { if (syncing) return; syncing = true; panes[1 - index].scrollTop = pane.scrollTop; panes[1 - index].scrollLeft = pane.scrollLeft; requestAnimationFrame(() => { syncing = false; }); }));
 }
 function showContext(x, y, path, side, folder) {
   document.querySelector('.diff-context-menu')?.remove(); const menu = document.createElement('div'); menu.className = 'diff-context-menu'; menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:1000`;
-  menu.innerHTML = `<button data-action="upload"><span class="codicon codicon-cloud-upload"></span>Upload to remote</button><button data-action="download"><span class="codicon codicon-cloud-download"></span>Download to local</button><button data-action="ignore"><span class="codicon codicon-exclude"></span>Add to ignore</button><button data-action="rename"><span class="codicon codicon-edit"></span>Rename</button><button class="danger" data-action="delete"><span class="codicon codicon-trash"></span>Delete ${side}</button>`;
-  document.body.append(menu); menu.querySelectorAll('button').forEach(button => button.addEventListener('click', () => { const action = button.dataset.action; menu.remove(); if (action === 'ignore') return addIgnore(folder ? `${path}/**` : path); progress(true, `${action === 'upload' ? 'Uploading' : action === 'download' ? 'Downloading' : action === 'delete' ? 'Deleting' : 'Renaming'} ${path}`); vscode.postMessage({ type: 'diffAction', action, direction: action === 'upload' ? 'local' : action === 'download' ? 'remote' : side, path: folder ? `${path}/` : path, connection: getProfile() }); }));
+  const record = diff.records.get(path); const canUpload = Boolean(record?.local); const canDownload = Boolean(record?.remote);
+  menu.innerHTML = `${folder ? '' : '<button data-action="view"><span class="codicon codicon-diff"></span>View file diff</button>'}${canUpload ? '<button data-action="upload"><span class="codicon codicon-cloud-upload"></span>Upload to remote</button>' : ''}${canDownload ? '<button data-action="download"><span class="codicon codicon-cloud-download"></span>Download to local</button>' : ''}<button data-action="ignore"><span class="codicon codicon-exclude"></span>Add to ignore</button><button data-action="rename"><span class="codicon codicon-edit"></span>Rename</button><button class="danger" data-action="delete"><span class="codicon codicon-trash"></span>Delete ${side}</button>`;
+  document.body.append(menu); const bounds = menu.getBoundingClientRect(); menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8))}px`; menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8))}px`; menu.style.maxHeight = `${Math.max(120, window.innerHeight - 16)}px`; menu.style.overflowY = 'auto'; menu.querySelectorAll('button').forEach(button => button.addEventListener('click', () => { const action = button.dataset.action; menu.remove(); if (action === 'view') return requestFileDiff(path); if (action === 'ignore') return addIgnore(folder ? `${path}/**` : path); progress(true, `${action === 'upload' ? 'Uploading' : action === 'download' ? 'Downloading' : action === 'delete' ? 'Deleting' : 'Renaming'} ${path}`); vscode.postMessage({ type: 'diffAction', action, direction: action === 'upload' ? 'local' : action === 'download' ? 'remote' : side, path: folder ? `${path}/` : path, connection: getProfile() }); }));
   setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
 }
 function applyDashboardZoom(value) { document.documentElement.style.zoom = `${Math.min(160, Math.max(80, Number(value) || 110))}%`; }
 function progress(active, label, percentage) { const determinate = Number.isFinite(Number(percentage)); const amount = Math.min(100, Math.max(0, determinate ? Number(percentage) : (active ? 0 : 100))); $('diffTransferLabel').textContent = label; $('diffTransferPercent').textContent = active && !determinate ? 'Working' : `${Math.round(amount)}%`; $('diffTransferProgress').style.setProperty('--progress', `${amount}%`); $('diffTransferProgress').classList.toggle('is-active', active); $('diffTransferProgress').classList.toggle('is-indeterminate', active && !determinate); }
-function renderTransferQueue(items) { const queue = $('diffTransferQueue'); if (!queue) return; const transfers = Array.isArray(items) ? items : []; queue.innerHTML = transfers.length ? transfers.map(item => { const amount = Math.min(100, Math.max(0, Number(item.progress) || 0)); const parts = String(item.path || '').split('/'); const name = parts.pop() || item.path || 'Transfer'; const parent = parts.join('/'); const direction = item.direction === 'upload' ? '&gt;' : '&lt;'; return `<div class="transfer-item is-${esc(item.status)}" title="${esc(item.path)}"><div class="transfer-item-main"><span class="codicon codicon-file"></span><span class="transfer-item-copy"><strong>${esc(name)}</strong>${parent ? `<small>${esc(parent)}</small>` : ''}</span><b class="transfer-direction ${esc(item.direction)}" aria-label="${item.direction === 'upload' ? 'Upload to remote' : 'Download to local'}">${direction}</b></div><div class="transfer-item-progress ${item.status === 'transferring' && amount === 0 ? 'is-indeterminate' : ''}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}" style="--item-progress:${amount}%"><i></i></div></div>`; }).join('') : '<div class="transfer-empty">No queued transfers</div>'; }
-function buildMiddleTransferControls() { const actions = $('diffTransferQueue')?.parentElement; if (!actions || $('btnSyncChangedUpMiddle')) return; $('btnUploadDiff').classList.add('transfer-button', 'upload'); $('btnDownloadDiff').classList.add('transfer-button', 'download'); const up = document.createElement('button'); up.id = 'btnSyncChangedUpMiddle'; up.type = 'button'; up.className = 'button transfer-button upload'; up.innerHTML = '<span class="codicon codicon-cloud-upload"></span> Sync changed up'; up.addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'up' })); const down = document.createElement('button'); down.id = 'btnSyncChangedDownMiddle'; down.type = 'button'; down.className = 'button transfer-button download'; down.innerHTML = '<span class="codicon codicon-cloud-download"></span> Sync changed down'; down.addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'down' })); actions.insertBefore(up, $('diffTransferQueue')); actions.insertBefore(down, $('diffTransferQueue')); }
-function applyAutoSyncCopy() { const watcherCopy = $('enableFileWatcher')?.closest('.setting-row')?.querySelector('span'); if (watcherCopy) { watcherCopy.childNodes[0].textContent = 'Auto Sync'; const detail = watcherCopy.querySelector('small'); if (detail) detail.textContent = 'Upload local changes after files have been quiet for 1 second.'; } const hostLabel = $('hostAutoSync')?.closest('label'); if (hostLabel?.childNodes[0]) hostLabel.childNodes[0].textContent = 'Auto Sync'; }
+function renderTransferQueue(items) { const queue = $('diffTransferQueue'); if (!queue) return; const transfers = Array.isArray(items) ? items : []; queue.innerHTML = transfers.length ? transfers.map(item => { const amount = Math.min(100, Math.max(0, Number(item.progress) || 0)); const parts = String(item.path || '').split('/'); const name = parts.pop() || item.path || 'Transfer'; const parent = parts.join('/'); const deleting = item.direction === 'delete'; const direction = deleting ? '&times;' : item.direction === 'upload' ? '&gt;' : '&lt;'; const directionLabel = deleting ? 'Delete' : item.direction === 'upload' ? 'Upload to remote' : 'Download to local'; return `<div class="transfer-item is-${esc(item.status)} ${deleting ? 'is-delete' : ''}" title="${esc(item.path)}"><div class="transfer-item-main"><span class="codicon ${deleting ? 'codicon-trash' : 'codicon-file'}"></span><span class="transfer-item-copy"><strong>${esc(name)}</strong>${parent ? `<small>${esc(parent)}</small>` : ''}</span><b class="transfer-direction ${esc(item.direction)}" aria-label="${directionLabel}">${direction}</b></div><div class="transfer-item-progress ${item.status === 'transferring' && amount === 0 ? 'is-indeterminate' : ''}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${amount}" style="--item-progress:${amount}%"><i></i></div></div>`; }).join('') : '<div class="transfer-empty">No queued transfers</div>'; }
+function closeFolderPicker() { document.querySelector('.folder-tree-popover')?.remove(); if (folderPickerOutsideHandler) document.removeEventListener('pointerdown', folderPickerOutsideHandler, true); folderPickerOutsideHandler = undefined; folderPicker = undefined; }
+function requestFolderChildren(path) {
+  if (!folderPicker || folderPicker.loading.has(path)) return;
+  folderPicker.loading.add(path); renderFolderPicker();
+  vscode.postMessage({ type: 'browseFolders', requestId: folderPicker.requestId, kind: folderPicker.kind, path, connection: getProfile() });
+}
+function renderFolderPicker() {
+  if (!folderPicker) return;
+  const popover = document.querySelector('.folder-tree-popover'); if (!popover) return;
+  const rows = [];
+  const add = (path, label, depth) => {
+    const node = folderPicker.nodes.get(path); const expanded = node?.expanded; const loading = folderPicker.loading.has(path);
+    rows.push(`<button class="folder-tree-row" type="button" data-folder-path="${esc(path)}" style="padding-left:${6 + depth * 16}px"><span class="folder-expand codicon ${loading ? 'codicon-loading codicon-modifier-spin' : expanded ? 'codicon-chevron-down' : 'codicon-chevron-right'}" data-folder-expand="${esc(path)}"></span><span class="folder-label"><span class="codicon ${depth ? 'codicon-folder' : 'codicon-root-folder'}"></span>${esc(label)}</span></button>`);
+    if (expanded) (node.children || []).forEach(child => add(child.path, child.name, depth + 1));
+  };
+  add(folderPicker.root, folderPicker.kind === 'local' ? 'Workspace root' : '/', 0);
+  popover.innerHTML = rows.join('') || '<div class="folder-tree-loading">No folders found.</div>';
+  popover.querySelectorAll('[data-folder-expand]').forEach(control => control.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); const path = control.dataset.folderExpand; const node = folderPicker.nodes.get(path) || { children: [] }; if (!node.loaded) requestFolderChildren(path); else { node.expanded = !node.expanded; folderPicker.nodes.set(path, node); renderFolderPicker(); } }));
+  popover.querySelectorAll('[data-folder-path]').forEach(row => row.addEventListener('click', () => selectFolder(row.dataset.folderPath)));
+}
+function selectFolder(path) {
+  if (!folderPicker) return; const target = folderPicker.target; const profile = getProfile(); if (!profile) return closeFolderPicker();
+  if (target === 'host-local' || target === 'transfer-local') profile.localPath = path || undefined;
+  else profile.remotePath = path || '/';
+  renderHostEditor(); updateRootFields(); scheduleSave(); closeFolderPicker();
+  if (target.startsWith('transfer-')) refreshDiff(true);
+}
+function openFolderPicker(target, anchor) {
+  const profile = getProfile(); if (!profile) return;
+  updateProfile(); closeFolderPicker();
+  const kind = target.endsWith('local') ? 'local' : 'remote'; const root = kind === 'local' ? '' : '/';
+  const popover = document.createElement('div'); popover.className = 'folder-tree-popover'; document.body.append(popover);
+  const bounds = anchor.getBoundingClientRect(); popover.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - popover.offsetWidth - 8))}px`; popover.style.top = `${Math.min(bounds.bottom + 4, window.innerHeight - popover.offsetHeight - 8)}px`;
+  folderPicker = { target, kind, root, requestId: `${Date.now()}-${Math.random()}`, nodes: new Map([[root, { children: [], expanded: true, loaded: false }]]), loading: new Set() };
+  requestFolderChildren(root); folderPickerOutsideHandler = event => { if (!event.target.closest('.folder-tree-popover') && !event.target.closest('[data-folder-picker]')) closeFolderPicker(); }; setTimeout(() => document.addEventListener('pointerdown', folderPickerOutsideHandler, true), 0);
+}
+function buildMiddleTransferControls() { const actions = $('diffTransferQueue')?.parentElement; if (!actions || $('btnSyncChangedUpMiddle')) return; $('btnUploadDiff').classList.add('transfer-button', 'upload'); $('btnDownloadDiff').classList.add('transfer-button', 'download'); const view = document.createElement('button'); view.id = 'btnViewDiff'; view.type = 'button'; view.className = 'button transfer-button'; view.disabled = true; view.innerHTML = '<span class="codicon codicon-diff"></span> View diff'; view.addEventListener('click', () => selectedPath && requestFileDiff(selectedPath)); const up = document.createElement('button'); up.id = 'btnSyncChangedUpMiddle'; up.type = 'button'; up.className = 'button transfer-button upload'; up.innerHTML = '<span class="codicon codicon-cloud-upload"></span> Sync changed up'; up.addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'up', connection: getProfile() })); const down = document.createElement('button'); down.id = 'btnSyncChangedDownMiddle'; down.type = 'button'; down.className = 'button transfer-button download'; down.innerHTML = '<span class="codicon codicon-cloud-download"></span> Sync changed down'; down.addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'down', connection: getProfile() })); actions.insertBefore(view, $('diffTransferQueue')); actions.insertBefore(up, $('diffTransferQueue')); actions.insertBefore(down, $('diffTransferQueue')); }
+function buildDiffColumnHeadings() { ['diffLocalCount', 'diffRemoteCount'].forEach(id => { const count = $(id); if (!count || count.parentElement.querySelector('.file-size-heading')) return; const heading = document.createElement('span'); heading.className = 'file-size-heading'; heading.textContent = 'Size'; count.parentElement.insertBefore(heading, count); }); }
+function applyAutoSyncCopy() { const watcherCopy = $('enableFileWatcher')?.closest('.setting-row')?.querySelector('span'); if (watcherCopy) { watcherCopy.childNodes[0].textContent = 'Auto Sync watcher'; const detail = watcherCopy.querySelector('small'); if (detail) detail.textContent = 'Watch local and remote changes; enabled directions transfer after 1 quiet second.'; } const select = $('hostAutoSync'); const hostLabel = select?.closest('label'); if (hostLabel?.childNodes[0]) hostLabel.childNodes[0].textContent = 'Auto Sync direction'; const copy = { upload: 'Sync local edits up', download: 'Sync remote edits down', both: 'Sync edits both ways' }; Object.entries(copy).forEach(([value, label]) => { const option = select?.querySelector(`option[value="${value}"]`); if (option) option.textContent = label; }); }
 const analyticsCharts = {};
 function formatBytes(value) { const bytes = Number(value) || 0; if (bytes < 1024) return `${bytes} B`; if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`; return `${(bytes / 1073741824).toFixed(1)} GB`; }
 function drawChart(id, config) { if (typeof Chart !== 'function' || !$(id)) return; if (analyticsCharts[id]) analyticsCharts[id].destroy(); analyticsCharts[id] = new Chart($(id).getContext('2d'), config); }
@@ -165,31 +245,39 @@ function updateAnalytics(data) {
 
 document.querySelectorAll('[data-panel]').forEach(node => node.addEventListener('click', () => setPanel(node.dataset.panel)));
 buildMiddleTransferControls();
+buildDiffColumnHeadings();
 applyAutoSyncCopy();
-$('btnAddHost').addEventListener('click', () => { profiles.push({ name: 'New host', protocol: 'sftp', host: '', username: '', port: 22, remotePath: '/' }); selectedIndex = profiles.length - 1; renderHosts(); scheduleSave(); });
+$('btnRefreshDiff').textContent = 'Full remote refresh'; $('btnRefreshDiff').title = 'Relist the remote server to detect changes made outside ITFFTP';
+$('btnAddHost').addEventListener('click', () => { profiles.push({ name: 'New host', protocol: 'sftp', host: '', username: '', port: 22, remotePath: '/' }); selectedIndex = profiles.length - 1; renderHosts(); updateRootFields(); scheduleSave(); });
 $('btnDeleteHost').addEventListener('click', () => { profiles.splice(selectedIndex, 1); selectedIndex = profiles.length ? 0 : -1; renderHosts(); renderIgnoreEditor(); scheduleSave(); });
 $('btnTestHost').addEventListener('click', () => { updateProfile(); vscode.postMessage({ type: 'testConnection', connection: getProfile() }); });
-['hostName','hostProtocol','hostAddress','hostUsername','hostPassword','hostPort','hostRemotePath','hostCollisionPolicy','hostSyncMode','hostAutoSync','hostDefault'].forEach(id => $(id).addEventListener(['hostProtocol','hostCollisionPolicy','hostSyncMode','hostAutoSync','hostDefault'].includes(id) ? 'change' : 'input', () => { updateProfile(); renderHosts(); scheduleSave(); }));
+['hostName','hostProtocol','hostAddress','hostUsername','hostPassword','hostPort','hostCollisionPolicy','hostSyncMode','hostAutoSync','hostDefault'].forEach(id => $(id).addEventListener(['hostProtocol','hostCollisionPolicy','hostSyncMode','hostAutoSync','hostDefault'].includes(id) ? 'change' : 'input', () => { updateProfile(); renderHosts(); updateRootFields(); scheduleSave(); }));
+document.querySelectorAll('[data-folder-picker]').forEach(button => button.addEventListener('click', () => openFolderPicker(button.dataset.folderPicker, button)));
 $('ignoreHost').addEventListener('change', event => { selectedIndex = Number(event.target.value); selectedWorkspacePath = ''; selectedIgnoredPattern = ''; renderHosts(); renderIgnoreEditor(); });
 $('btnIgnorePath').addEventListener('click', () => addIgnore(selectedWorkspacePath.endsWith('/') ? `${selectedWorkspacePath}/**` : selectedWorkspacePath));
 $('btnRestorePath').addEventListener('click', () => { const profile = getProfile(); if (!profile || !selectedIgnoredPattern) return; profile.ignore = profile.ignore.filter(item => item !== selectedIgnoredPattern); selectedIgnoredPattern = ''; renderIgnoreEditor(); renderDiff(); scheduleSave(); });
 $('btnAddManualIgnore').addEventListener('click', () => addIgnore($('manualIgnore').value)); $('manualIgnore').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addIgnore($('manualIgnore').value); } });
-$('btnRefreshDiff').addEventListener('click', refreshDiff); $('btnUploadDiff').addEventListener('click', () => selectedPath && vscode.postMessage({ type: 'diffAction', action: 'upload', direction: 'local', path: selectedPath, connection: getProfile() })); $('btnDownloadDiff').addEventListener('click', () => selectedPath && vscode.postMessage({ type: 'diffAction', action: 'download', direction: 'remote', path: selectedPath, connection: getProfile() }));
-$('btnSyncChangedUp').addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'up' })); $('btnSyncChangedDown').addEventListener('click', () => vscode.postMessage({ type: 'syncAllChanged', direction: 'down' }));
+$('btnRefreshDiff').addEventListener('click', () => refreshDiff(true)); $('btnUploadDiff').addEventListener('click', () => selectedPath && vscode.postMessage({ type: 'diffAction', action: 'upload', direction: 'local', path: selectedPath, connection: getProfile() })); $('btnDownloadDiff').addEventListener('click', () => selectedPath && vscode.postMessage({ type: 'diffAction', action: 'download', direction: 'remote', path: selectedPath, connection: getProfile() }));
+$('btnCreateRemoteFolder').addEventListener('click', () => vscode.postMessage({ type: 'createRemoteFolder', connection: getProfile() }));
 ['diffChangedOnly', 'diffHideIgnored', 'diffFollow'].forEach(id => $(id).addEventListener('change', renderDiff)); settingIds.forEach(id => $(id).addEventListener('change', scheduleSave)); $('transferConcurrency').addEventListener('input', scheduleSave); $('dashboardZoom').addEventListener('input', () => { applyDashboardZoom($('dashboardZoom').value); scheduleSave(); }); $('remoteExplorerSortOrder').addEventListener('change', scheduleSave); $('analyticsProjectFilter').addEventListener('change', () => vscode.postMessage({ type: 'analyticsFilter', projectId: $('analyticsProjectFilter').value }));
 $('btnImportConnections').addEventListener('click', () => vscode.postMessage({ type: 'importConnections' })); $('btnExportConnections').addEventListener('click', () => vscode.postMessage({ type: 'exportConnections', connections: JSON.stringify(profiles), selectedOnly: false })); $('btnExportSelected').addEventListener('click', () => getProfile() && vscode.postMessage({ type: 'exportConnections', connections: JSON.stringify([getProfile()]), selectedOnly: true })); $('btnOpenJson').addEventListener('click', () => vscode.postMessage({ type: 'openJson' }));
 
 window.addEventListener('message', event => { const data = event.data || {};
   if (data.type === 'settings') { setSettings(data.settings || {}); settingsLoaded = true; }
   if (data.type === 'workspaceFiles') { workspaceFiles = Array.isArray(data.workspaceFiles) ? data.workspaceFiles : []; renderIgnoreEditor(); }
-  if (data.type === 'diffStart') { diff.records.clear(); $('diffRemoteRoot').value = data.root || '/'; renderDiff(); }
-  if (data.type === 'diffBatch' || data.type === 'diffScanComplete') { (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
-  if (data.type === 'diffPatch') { (data.removed || []).forEach(path => diff.records.delete(path)); (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
+  if (data.type === 'folderPicker' && folderPicker?.requestId === data.requestId) { const node = folderPicker.nodes.get(data.path) || { children: [] }; node.children = Array.isArray(data.entries) ? data.entries : []; node.loaded = true; node.expanded = true; folderPicker.nodes.set(data.path, node); folderPicker.loading.delete(data.path); renderFolderPicker(); }
+  if (data.type === 'diffStart') { diff.records.clear(); diff.loadedFolders = new Set(['']); diff.loadingFolders.clear(); $('diffRemoteRoot').value = data.root || '/'; renderDiff(); }
+  if (data.type === 'diffBatch') { (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
+  if (data.type === 'diffSnapshot') { diff.records.clear(); (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); }
+  if (data.type === 'diffScanComplete') { (data.records || []).forEach(record => diff.records.set(record.path, record)); renderDiff(); progress(false, `Comparison updated (${diff.records.size} paths)`, 100); }
+  if (data.type === 'diffPatch') { (data.removed || []).forEach(path => diff.records.delete(path)); (data.records || []).forEach(record => diff.records.set(record.path, record)); if (typeof data.root === 'string') { diff.loadedFolders.add(data.root); diff.loadingFolders.delete(data.root); } renderDiff(); }
   if (data.type === 'diffTransferProgress') progress(Boolean(data.active), data.label || 'Working…', data.percentage);
   if (data.type === 'diffTransferQueue') renderTransferQueue(data.items);
   if (data.type === 'diffActionComplete') { renderDiff(); }
+  if (data.type === 'remoteFolderCreated') { toast(data.message || 'Remote folder created.', 'success'); refreshDiff(true); }
   if (data.type === 'diffFile' && data.path === selectedPath) { if (data.direction === 'local') diff.localContent = data.content; else diff.remoteContent = data.content; renderFileDiff(); }
-  if (data.type === 'remoteDiffError' || data.type === 'saveError' || data.type === 'testError') toast(data.message || 'ITFFTP operation failed.', 'error');
+  if (data.type === 'remoteDiffError') { progress(false, 'Unable to refresh file comparison', 100); toast(data.message || 'ITFFTP operation failed.', 'error'); }
+  if (data.type === 'saveError' || data.type === 'testError') toast(data.message || 'ITFFTP operation failed.', 'error');
   if (data.type === 'saveSuccess') { $('autoSaveStatus').textContent = 'All changes saved.'; toast('Settings saved automatically.', 'success'); }
   if (data.type === 'testSuccess') toast(data.message || 'Connection test succeeded.', 'success');
   if (data.type === 'connectionsImported') { profiles = Array.isArray(data.connections) ? data.connections : []; selectedIndex = profiles.length ? 0 : -1; renderHosts(); renderIgnoreEditor(); scheduleSave(); }

@@ -14,7 +14,7 @@ import { transferManager } from '../core/transfer-manager';
 import { webMasterTools } from '../webmaster/tools';
 import { getWorkspaceRoot } from '../commands/utils';
 import { CompareResult, CompareTreeNode, CompareItem } from '../types';
-import { formatFileSize, formatDate, normalizeRemotePath, sanitizeRelativePath } from '../utils/helpers';
+import { formatFileSize, normalizeRemotePath } from '../utils/helpers';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 
@@ -146,7 +146,7 @@ export class CompareViewProvider {
             useMtime: true,
             onProgress: (message, increment) => {
               // Check if still valid
-              if (!this._panel || !this._isComparing) return;
+              if (!this._panel || !this._isComparing) {return;}
               progress.report({ message, increment });
             }
           }
@@ -176,7 +176,7 @@ export class CompareViewProvider {
    * Update the view with current filter and search
    */
   private _updateView(): void {
-    if (!this._panel || !this._compareResult) return;
+    if (!this._panel || !this._compareResult) {return;}
 
     const filteredTree = this._filterTree(this._compareResult.tree);
     const stats = this._getStats();
@@ -204,14 +204,14 @@ export class CompareViewProvider {
     const localItem = node.localItem;
     const remoteItem = node.remoteItem;
 
-    if (localItem && this._filter === 'local') matchesFilter = true;
-    if (remoteItem && this._filter === 'remote') matchesFilter = true;
+    if (localItem && this._filter === 'local') {matchesFilter = true;}
+    if (remoteItem && this._filter === 'remote') {matchesFilter = true;}
     if ((localItem || remoteItem) && this._filter === 'different') {
       if (localItem?.side === 'different' || remoteItem?.side === 'different') {
         matchesFilter = true;
       }
     }
-    if (this._filter === 'all') matchesFilter = true;
+    if (this._filter === 'all') {matchesFilter = true;}
 
     // Check search query
     if (searchLower && !node.name.toLowerCase().includes(searchLower)) {
@@ -314,7 +314,7 @@ export class CompareViewProvider {
    * Show diff for a file
    */
   private async _showDiff(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config || !this._connection) return;
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
     const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
@@ -353,7 +353,7 @@ export class CompareViewProvider {
    * Upload a file
    */
   private async _uploadFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config || !this._connection) return;
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
     const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
@@ -363,7 +363,7 @@ export class CompareViewProvider {
       const remoteDir = normalizeRemotePath(path.dirname(remotePath));
       try {
         await this._connection.mkdir(remoteDir);
-      } catch { }
+      } catch { /* Directory may already exist. */ }
 
       await transferManager.uploadFile(this._connection, localPath, remotePath, this._config);
       statusBar.success(`Uploaded: ${path.basename(filePath)}`);
@@ -380,7 +380,7 @@ export class CompareViewProvider {
    * Download a file
    */
   private async _downloadFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config || !this._connection) return;
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
     const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
@@ -407,7 +407,7 @@ export class CompareViewProvider {
    * Reveal local file in explorer
    */
   private async _revealLocal(filePath: string): Promise<void> {
-    if (!this._workspaceRoot) return;
+    if (!this._workspaceRoot) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
 
@@ -422,7 +422,7 @@ export class CompareViewProvider {
    * Reveal remote file in remote explorer
    */
   private async _revealRemote(filePath: string): Promise<void> {
-    if (!this._config) return;
+    if (!this._config) {return;}
 
     const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
 
@@ -438,7 +438,7 @@ export class CompareViewProvider {
    * Export results
    */
   private async _exportResults(format: 'json' | 'csv'): Promise<void> {
-    if (!this._compareResult) return;
+    if (!this._compareResult) {return;}
 
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(`compare-results.${format}`),
@@ -447,7 +447,7 @@ export class CompareViewProvider {
       }
     });
 
-    if (!uri) return;
+    if (!uri) {return;}
 
     try {
       let content: string;
@@ -490,7 +490,7 @@ export class CompareViewProvider {
    * Refresh comparison
    */
   private async _refresh(): Promise<void> {
-    if (!this._workspaceRoot || !this._config || !this._connection) return;
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     try {
       this._updateHtml(this._getLoadingHtml('Refreshing...'));
@@ -1026,10 +1026,10 @@ export class CompareViewProvider {
    */
   private _hasItemsInSubtree(node: CompareTreeNode, side: 'local' | 'remote'): boolean {
     const item = side === 'local' ? node.localItem : node.remoteItem;
-    if (item) return true;
+    if (item) {return true;}
 
     for (const child of node.children) {
-      if (this._hasItemsInSubtree(child, side)) return true;
+      if (this._hasItemsInSubtree(child, side)) {return true;}
     }
 
     return false;
@@ -1039,7 +1039,7 @@ export class CompareViewProvider {
    * Get indent based on path depth
    */
   private _getIndent(path: string): number {
-    if (!path) return 8;
+    if (!path) {return 8;}
     return 8 + (path.split('/').length - 1) * 16;
   }
 
@@ -1047,7 +1047,7 @@ export class CompareViewProvider {
    * Get status class
    */
   private _getStatusClass(item?: CompareItem): string {
-    if (!item) return '';
+    if (!item) {return '';}
     switch (item.side) {
       case 'local': return 'status-local';
       case 'remote': return 'status-remote';
@@ -1060,7 +1060,7 @@ export class CompareViewProvider {
    * Get background class
    */
   private _getBgClass(item?: CompareItem): string {
-    if (!item) return '';
+    if (!item) {return '';}
     switch (item.side) {
       case 'local': return 'bg-local';
       case 'remote': return 'bg-remote';

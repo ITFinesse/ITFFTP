@@ -6,10 +6,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as os from 'os';
-import { Client, FileInfo } from 'basic-ftp';
+import { Client } from 'basic-ftp';
 import { BaseConnection } from './connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
+import { isRemoteMissingError } from './connection-errors';
 import { normalizeRemotePath } from '../utils/helpers';
 import { isConnectionClosedError } from './connection-errors';
 
@@ -64,7 +65,7 @@ export class FTPConnection extends BaseConnection {
   }
 
   async disconnect(): Promise<void> {
-    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
+    if (this.keepaliveTimer) {clearInterval(this.keepaliveTimer);}
     this.keepaliveTimer = undefined;
     this.client.close();
     this._connected = false;
@@ -73,9 +74,9 @@ export class FTPConnection extends BaseConnection {
 
   private startKeepalive(): void {
     const interval = this.config.keepalive ?? 300000;
-    if (interval <= 0) return;
+    if (interval <= 0) {return;}
     this.keepaliveTimer = setInterval(() => {
-      if (!this.connected) return;
+      if (!this.connected) {return;}
       void this.enqueue(async () => {
         try { await this.client.send('NOOP'); }
         catch (error) { logger.debug(`FTP keepalive failed for ${this.config.host}`, error); }
@@ -111,7 +112,7 @@ export class FTPConnection extends BaseConnection {
             const user = item.permissions?.user;
             const group = item.permissions?.group;
             const other = item.permissions?.world;
-            let type = this.mapFileType(item.type);
+            const type = this.mapFileType(item.type);
             let isSymlinkToDirectory: boolean | undefined = undefined;
 
             // For symlinks in FTP, try to determine if it's a directory
@@ -154,8 +155,8 @@ export class FTPConnection extends BaseConnection {
         return entries;
       } catch (error) {
         const message = String((error as Error)?.message || error);
-        if (/\b550\b/i.test(message)) logger.debug(`FTP path is not listable: ${remotePath}`, { message });
-        else if (!isConnectionClosedError(error)) logger.error('FTP list error', error);
+        if (/\b550\b/i.test(message)) {logger.debug(`FTP path is not listable: ${remotePath}`, { message });}
+        else if (!isConnectionClosedError(error)) {logger.error('FTP list error', error);}
         throw error;
       }
     });
@@ -206,7 +207,7 @@ export class FTPConnection extends BaseConnection {
           throw new Error(`Cannot download to ${localPath}: a directory exists at this path.`);
         }
       } catch (e: any) {
-        if (e.code !== 'ENOENT') throw e;
+        if (e.code !== 'ENOENT') {throw e;}
       }
 
       await this.client.downloadTo(localPath, remotePath);
@@ -234,7 +235,7 @@ export class FTPConnection extends BaseConnection {
         // Some FTP servers reject basic-ftp's existence probe even when the
         // directory already exists. Let the transfer itself determine whether
         // the parent is usable instead of failing a valid upload preflight.
-        if (!/550\s+can'?t check for file existence/i.test(String((error as Error)?.message || error))) throw error;
+        if (!/550\s+can'?t check for file existence/i.test(String((error as Error)?.message || error))) {throw error;}
         logger.debug(`FTP server cannot probe directory existence for ${normalizedPath}; continuing upload`);
       }
     } finally {
@@ -250,59 +251,19 @@ export class FTPConnection extends BaseConnection {
     try {
       this.emit('transferStart', { direction: 'upload', localPath, remotePath });
       this.client.trackProgress(info => this.emitProgress(localPath, info.bytes, 0));
-
-      // Ensure parent directory exists before uploading
-      const parentDir = path.dirname(remotePath);
-      if (parentDir && parentDir !== '.' && parentDir !== '/') {
+      const startedAt = Date.now();
+      logger.info(`FTP upload started: ${remotePath}`);
+      try {
+        await this.client.uploadFrom(localPath, remotePath);
+      } catch (error) {
+        if (!isRemoteMissingError(error)) {throw error;}
+        const parentDir = path.dirname(remotePath);
+        if (!parentDir || parentDir === '.' || parentDir === '/') {throw error;}
+        logger.info(`FTP upload parent is missing; creating ${parentDir} and retrying once`);
         await this.ensureRemoteDir(parentDir);
+        await this.client.uploadFrom(localPath, remotePath);
       }
-
-      // EISDIR safety: check if remote path is already a directory
-      let remoteStat = null;
-      try {
-        remoteStat = await this._stat(remotePath);
-      } catch {
-        // File doesn't exist yet - that's fine
-      }
-      if (remoteStat && remoteStat.type === 'directory') {
-        throw new Error(`Cannot upload to ${remotePath}: a directory exists at this path.`);
-      }
-
-      // Atomic upload: upload to temp file first, then rename
-      // This ensures files are never partially uploaded
-      const tempRemotePath = `${remotePath}.stackerftp.tmp`;
-
-      try {
-        // Upload to temp file
-        await this.client.uploadFrom(localPath, tempRemotePath);
-
-        // Delete existing target file if it exists (rename might fail otherwise)
-        try {
-          await this.client.remove(remotePath);
-        } catch {
-          // Target file might not exist - that's OK
-        }
-
-        // Rename temp file to target. Servers that reject RNTO's target
-        // existence probe can still accept a normal direct overwrite.
-        try {
-          await this.client.rename(tempRemotePath, remotePath);
-        } catch (error) {
-          if (!/550\s+can'?t check for file existence/i.test(String((error as Error)?.message || error))) throw error;
-          logger.warn(`FTP server rejected atomic rename for ${remotePath}; using direct upload fallback`);
-          await this.client.uploadFrom(localPath, remotePath);
-          try { await this.client.remove(tempRemotePath); } catch { /* Best-effort cleanup. */ }
-        }
-      } catch (uploadError) {
-        // Clean up temp file on failure
-        try {
-          await this.client.remove(tempRemotePath);
-        } catch {
-          // Ignore cleanup errors
-        }
-        throw uploadError;
-      }
-
+      logger.info(`FTP upload data complete: ${remotePath}; ${Date.now() - startedAt}ms`);
       this.emit('transferComplete', { direction: 'upload', localPath, remotePath });
     } catch (error) {
       logger.error('FTP upload error', error);
@@ -331,6 +292,10 @@ export class FTPConnection extends BaseConnection {
       try {
         await this.client.remove(remotePath);
       } catch (error) {
+        if (isRemoteMissingError(error)) {
+          logger.info(`FTP delete skipped because the remote file is already missing: ${remotePath}`);
+          return;
+        }
         logger.error('FTP delete error', error);
         throw error;
       }
@@ -451,7 +416,7 @@ export class FTPConnection extends BaseConnection {
         try {
           await fs.promises.unlink(tempPath);
         } catch (cleanupError: any) {
-          if (cleanupError?.code !== 'ENOENT') logger.warn('Failed to cleanup temp file', cleanupError);
+          if (cleanupError?.code !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
         }
       }
     });
@@ -476,19 +441,14 @@ export class FTPConnection extends BaseConnection {
         try {
           await fs.promises.unlink(tempPath);
         } catch (cleanupError: any) {
-          if (cleanupError?.code !== 'ENOENT') logger.warn('Failed to cleanup temp file', cleanupError);
+          if (cleanupError?.code !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
         }
       }
     });
   }
 
-  async exec(command: string): Promise<{ stdout: string; stderr: string; code: number }> {
-    try {
-      // FTP doesn't support remote command execution like SSH
-      // Some FTP servers support SITE EXEC, but it's not standard
-      throw new Error('Remote command execution is not supported in FTP. Use SFTP instead.');
-    } catch (error) {
-      throw error;
-    }
+  async exec(_command: string): Promise<{ stdout: string; stderr: string; code: number }> {
+    // FTP doesn't support remote command execution like SSH.
+    throw new Error('Remote command execution is not supported in FTP. Use SFTP instead.');
   }
 }

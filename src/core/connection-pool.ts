@@ -24,7 +24,8 @@ interface ServerPool {
 }
 
 const IDLE_TIMEOUT_MS = 60_000;
-const MAX_POOL_SIZE = 4;
+const MAX_POOL_SIZE = 100;
+const CONNECT_TIMEOUT_MS = 15_000;
 
 export class ConnectionPool {
   private pools: Map<string, ServerPool> = new Map();
@@ -105,7 +106,15 @@ export class ConnectionPool {
       pool.connecting++;
       const connection = this.createConnection(config);
       try {
-        await connection.connect();
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            connection.connect(),
+            new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(`Pool connection timed out after ${CONNECT_TIMEOUT_MS / 1000} seconds`)), CONNECT_TIMEOUT_MS); })
+          ]);
+        } finally {
+          if (timeout) {clearTimeout(timeout);}
+        }
         const entry: PoolEntry = {
           connection,
           inUse: true,
@@ -115,6 +124,7 @@ export class ConnectionPool {
         this.logPoolDebug(`Pool: new connection for ${config.host} (${pool.entries.length}/${maxSize})`, config.host, 'new');
         return connection;
       } catch (error) {
+        try { await connection.disconnect(); } catch { /* Best-effort cleanup after a failed pooled login. */ }
         logger.error(`Pool: failed to create connection for ${config.host}`, error);
         throw error;
       } finally {
@@ -133,7 +143,7 @@ export class ConnectionPool {
   release(config: FTPConfig, connection: BaseConnection): void {
     const key = this.getKey(config);
     const pool = this.pools.get(key);
-    if (!pool) return;
+    if (!pool) {return;}
 
     for (let i = 0; i < pool.entries.length; i++) {
       const entry = pool.entries[i];
@@ -158,7 +168,7 @@ export class ConnectionPool {
   async drain(config: FTPConfig): Promise<void> {
     const key = this.getKey(config);
     const pool = this.pools.get(key);
-    if (!pool) return;
+    if (!pool) {return;}
 
     const disconnectPromises = pool.entries.map(async (entry) => {
       try {
@@ -215,14 +225,14 @@ export class ConnectionPool {
       for (const [, pool] of this.pools) {
         // Keep at least one idle connection, close the rest if idle too long
         const idleEntries = pool.entries.filter(e => !e.inUse && e.connection.connected);
-        if (idleEntries.length <= 1) continue;
+        if (idleEntries.length <= 1) {continue;}
 
         for (let i = 1; i < idleEntries.length; i++) {
           const entry = idleEntries[i];
           if (now - entry.lastUsed > IDLE_TIMEOUT_MS) {
             entry.connection.disconnect().catch(() => {});
             const idx = pool.entries.indexOf(entry);
-            if (idx !== -1) pool.entries.splice(idx, 1);
+            if (idx !== -1) {pool.entries.splice(idx, 1);}
             this.logPoolDebug(`Pool: closed idle connection for ${pool.config.host}`, pool.config.host, 'idle');
           }
         }

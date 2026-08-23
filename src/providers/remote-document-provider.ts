@@ -179,7 +179,7 @@ export class RemoteDocumentProvider implements vscode.TextDocumentContentProvide
     this._cache.clear();
   }
 
-  static createUri(remotePath: string, label?: string): vscode.Uri {
+  static createUri(remotePath: string, _label?: string): vscode.Uri {
     return vscode.Uri.parse(`${RemoteDocumentProvider.scheme}:${remotePath}`);
   }
 }

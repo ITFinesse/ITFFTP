@@ -13,7 +13,7 @@ import { BaseConnection } from '../core/connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { formatFileSize, formatDate, normalizeRemotePath, isBinaryFile, isSystemFile } from '../utils/helpers';
+import { formatFileSize, formatDate, normalizeRemotePath, isSystemFile } from '../utils/helpers';
 import { RemoteDocumentProvider } from './remote-document-provider';
 import * as os from 'os';
 import * as fs from 'fs';
@@ -215,7 +215,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     this.statusBarItem.dispose();
   }
 
-  provideFileDecoration(uri: vscode.Uri, token: vscode.CancellationToken): vscode.ProviderResult<vscode.FileDecoration> {
+  provideFileDecoration(_uri: vscode.Uri, _token: vscode.CancellationToken): vscode.ProviderResult<vscode.FileDecoration> {
     // This allows us to add badges/colors to files if needed
     return undefined;
   }
@@ -335,7 +335,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     return [];
   }
 
-  private sortEntries(entries: FileEntry[], config: FTPConfig, conn?: BaseConnection): RemoteTreeItem[] {
+  private sortEntries(entries: FileEntry[], config: FTPConfig, _conn?: BaseConnection): RemoteTreeItem[] {
     // Get sort order from config or VS Code settings
     const vsConfig = vscode.workspace.getConfiguration('stackerftp');
     const sortOrder = config.remoteExplorerOrder || vsConfig.get<string>('remoteExplorerSortOrder', 'name');
@@ -361,11 +361,12 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
       switch (sortOrder) {
         case 'size':
           return (b.size || 0) - (a.size || 0); // Largest first
-        case 'date':
+        case 'date': {
           const aTime = a.modifyTime?.getTime() || 0;
           const bTime = b.modifyTime?.getTime() || 0;
           return bTime - aTime; // Newest first
-        case 'type':
+        }
+        case 'type': {
           // Within same type, sort by extension then name
           const aExt = a.name.includes('.') ? a.name.split('.').pop() || '' : '';
           const bExt = b.name.includes('.') ? b.name.split('.').pop() || '' : '';
@@ -373,6 +374,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
             return aExt.localeCompare(bExt);
           }
           return a.name.localeCompare(b.name);
+        }
         case 'name':
         default:
           return a.name.localeCompare(b.name);
@@ -513,7 +515,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     const config = (itemParam instanceof RemoteTreeItem ? itemParam.config : configParam) || this.currentConfig;
     const conn = connectionManager.getConnection(config!) || this.connection;
 
-    if (!conn || !config) return;
+    if (!conn || !config) {return;}
 
     const relativePath = path.relative(config.remotePath || '/', item.path);
     const localPath = path.join(this.workspaceRoot, relativePath);
@@ -645,7 +647,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
 
     try {
       const conn = connectionManager.getConnection(config) || this.connection;
-      if (!conn) throw new Error('No active connection');
+      if (!conn) {throw new Error('No active connection');}
 
 
       // Check user preference
@@ -737,7 +739,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
         { modal: true },
         'Delete', 'Cancel'
       );
-      if (confirm !== 'Delete') return;
+      if (confirm !== 'Delete') {return;}
     }
 
     const progress = statusBar.startProgress('delete', `Deleting ${item.name}...`);

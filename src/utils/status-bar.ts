@@ -110,7 +110,7 @@ class StatusBarNotifier {
   }
 
   private processQueue(): void {
-    if (this.isProcessing || this.messageQueue.length === 0) return;
+    if (this.isProcessing || this.messageQueue.length === 0) {return;}
 
     this.isProcessing = true;
     const msg = this.messageQueue.shift()!;
@@ -254,7 +254,7 @@ class StatusBarNotifier {
 
   private scheduleProgressAutoStop(id: string, message: string): void {
     const timeoutMs = this.getProgressAutoStopMs(id);
-    if (timeoutMs <= 0) return;
+    if (timeoutMs <= 0) {return;}
 
     const existing = this.progressTimeouts.get(id);
     if (existing) {
@@ -263,7 +263,7 @@ class StatusBarNotifier {
 
     const timer = setTimeout(() => {
       const item = this.progressItems.get(id);
-      if (!item) return;
+      if (!item) {return;}
 
       this.stopProgress(id);
       this.warn(`Auto-cleared stale progress: ${message}`, 2500);
@@ -274,7 +274,7 @@ class StatusBarNotifier {
   }
 
   private getProgressAutoStopMs(id: string): number {
-    if (id === 'refresh') return 10000; // Refresh should never stay visible indefinitely
+    if (id === 'refresh') {return 10000;} // Refresh should never stay visible indefinitely
     return 0;
   }
 

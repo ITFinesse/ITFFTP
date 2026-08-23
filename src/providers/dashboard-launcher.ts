@@ -10,7 +10,7 @@ export class DashboardLauncherProvider implements vscode.WebviewViewProvider {
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = '';
     const openWhenVisible = (): void => {
-      if (!webviewView.visible) return;
+      if (!webviewView.visible) {return;}
       this.openDashboard();
       void vscode.commands.executeCommand('workbench.action.closeSidebar');
     };
