@@ -29,8 +29,8 @@ type DiffEntry = {
 type DiffRecord = {
   path: string;
   type: 'file' | 'directory';
-  local?: Omit<DiffEntry, 'path' | 'type'>;
-  remote?: Omit<DiffEntry, 'path' | 'type'>;
+  local?: Omit<DiffEntry, 'path'>;
+  remote?: Omit<DiffEntry, 'path'>;
   status: 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
   newer?: 'local' | 'remote';
 };
@@ -43,6 +43,8 @@ type DashboardJob = {
   progress: number;
   endTime?: number;
 };
+
+const DIFF_CACHE_VERSION = 2;
 
 const SETTING_KEYS = [
   'autoConnect',
@@ -92,6 +94,8 @@ export class SettingsPanel implements vscode.Disposable {
   private readonly localRefreshTimers = new Map<string, NodeJS.Timeout>();
   private cacheWriteTimer?: NodeJS.Timeout;
   private backgroundRefreshTimer?: NodeJS.Timeout;
+  private watchedRefreshTimer?: NodeJS.Timeout;
+  private watchedRefreshConfig?: FTPConfig;
   private lastBackgroundRefreshAt = 0;
   private activeComparisonCacheKey?: string;
   private readonly localDirtyPaths = new Set<string>();
@@ -211,6 +215,7 @@ export class SettingsPanel implements vscode.Disposable {
     this.localRefreshTimers.clear();
     if (this.cacheWriteTimer) {clearTimeout(this.cacheWriteTimer);}
     if (this.backgroundRefreshTimer) {clearTimeout(this.backgroundRefreshTimer);}
+    if (this.watchedRefreshTimer) {clearTimeout(this.watchedRefreshTimer);}
     if (this.transferQueueExpiryTimer) {clearTimeout(this.transferQueueExpiryTimer);}
     this.panel?.dispose();
     this.panel = undefined;
@@ -298,7 +303,7 @@ export class SettingsPanel implements vscode.Disposable {
     }
     try {
       const parsed = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(file)));
-      if (parsed?.version !== 1 || !Array.isArray(parsed.records)) {return;}
+      if (parsed?.version !== DIFF_CACHE_VERSION || !Array.isArray(parsed.records)) {return;}
       for (const record of parsed.records) {
         if (record && typeof record.path === 'string' && (record.type === 'file' || record.type === 'directory')) {
           this.latestDiffRecords.set(record.path, record as DiffRecord);
@@ -327,7 +332,7 @@ export class SettingsPanel implements vscode.Disposable {
       `${file.path.split('/').pop()}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
     );
     try {
-      const payload = JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), records: [...this.latestDiffRecords.values()] });
+      const payload = JSON.stringify({ version: DIFF_CACHE_VERSION, updatedAt: new Date().toISOString(), records: [...this.latestDiffRecords.values()] });
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.globalStorageUri!, 'diff-cache'));
       await vscode.workspace.fs.writeFile(temporary, new TextEncoder().encode(payload));
       await vscode.workspace.fs.rename(temporary, file, { overwrite: true });
@@ -339,7 +344,18 @@ export class SettingsPanel implements vscode.Disposable {
 
   public async refreshWatchedPath(config: FTPConfig, relativePath: string): Promise<void> {
     if (!relativePath || relativePath.includes('../')) {return;}
-    await this.refreshAfterTransfer([relativePath.replace(/\\/g, '/')], 'download', config);
+    this.watchedRefreshConfig = config;
+    if (this.watchedRefreshTimer) {clearTimeout(this.watchedRefreshTimer);}
+    this.watchedRefreshTimer = setTimeout(() => {
+      this.watchedRefreshTimer = undefined;
+      const active = this.watchedRefreshConfig;
+      this.watchedRefreshConfig = undefined;
+      if (!active) {return;}
+      // A watcher event says state changed; it does not prove the two peers now
+      // match. Relist both complete trees so collapsed descendants stay correct.
+      this.diffDirectoryCache.clear();
+      void this.scanComparison(active, '', ++this.diffScanGeneration, false, true, false);
+    }, 250);
   }
 
   private sendComparisonSnapshot(): void {
@@ -358,7 +374,7 @@ export class SettingsPanel implements vscode.Disposable {
       const record: DiffRecord = {
         path: relativePath,
         type,
-        local: { size: type === 'file' ? stat.size : undefined, modifyTime: stat.mtime },
+        local: { type, size: type === 'file' ? stat.size : undefined, modifyTime: stat.mtime },
         remote: current?.remote,
         status: 'same'
       };
@@ -773,16 +789,15 @@ export class SettingsPanel implements vscode.Disposable {
   private async loadRemoteDiffOnce(value: unknown, generation: number): Promise<void> {
     const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before loading remote files.');}
-    // List one paired directory at a time. Descendants are loaded when their
-    // folder is expanded; bulk sync performs the deliberate recursive pass.
-    await this.scanComparison(config, '', generation, false, false);
+    // Expansion is presentation-only. Every comparison discovers descendants.
+    await this.scanComparison(config, '', generation, false, true);
   }
 
   private async loadRemoteDiffFolder(value: unknown, relativePath: unknown): Promise<void> {
     const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before loading remote files.');}
     const relativeDirectory = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-    await this.scanComparison(config, relativeDirectory, ++this.diffScanGeneration, true, false);
+    await this.scanComparison(config, relativeDirectory, ++this.diffScanGeneration, true, true);
   }
 
   private async syncChanged(direction: 'up' | 'down', value?: unknown): Promise<void> {
@@ -1079,14 +1094,14 @@ export class SettingsPanel implements vscode.Disposable {
         for (const path of new Set([...localByPath.keys(), ...remoteByPath.keys()])) {
           const local = localByPath.get(path);
           const remote = remoteByPath.get(path);
-          const type = local?.type || remote?.type || 'file';
+          const type = local?.type === 'directory' || remote?.type === 'directory' ? 'directory' : 'file';
           records.set(path, {
             path, type,
-            local: local && { size: local.size, modifyTime: local.modifyTime },
-            remote: remote && { size: remote.size, modifyTime: remote.modifyTime },
+            local: local && { type: local.type, size: local.size, modifyTime: local.modifyTime },
+            remote: remote && { type: remote.type, size: remote.size, modifyTime: remote.modifyTime },
             status: 'same'
           });
-          if (type === 'directory' && recursive) {queue.push(path);}
+          if (recursive && (local?.type === 'directory' || remote?.type === 'directory')) {queue.push(path);}
         }
         if (verifyDirtyContent) {
           await this.clearFalseDirtyFlags(connection, config, [...new Set([...localByPath.keys(), ...remoteByPath.keys()])], records);

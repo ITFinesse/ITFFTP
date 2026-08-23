@@ -1,7 +1,7 @@
 export type ComparableFile = {
   type: 'file' | 'directory';
-  local?: { size?: number; modifyTime?: number };
-  remote?: { size?: number; modifyTime?: number };
+  local?: { type?: 'file' | 'directory'; size?: number; modifyTime?: number };
+  remote?: { type?: 'file' | 'directory'; size?: number; modifyTime?: number };
 };
 
 export type DiffStatus = 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
@@ -12,6 +12,7 @@ export type SyncDirection = 'up' | 'down';
 export function classifyDiff(record: ComparableFile, locallyDirty = false): DiffStatus {
   if (!record.local) { return 'missing-local'; }
   if (!record.remote) { return 'missing-remote'; }
+  if (record.local.type && record.remote.type && record.local.type !== record.remote.type) { return 'type-changed'; }
   if (record.type === 'directory') { return 'same'; }
   if (record.local.size !== record.remote.size) { return 'modified'; }
   return locallyDirty ? 'modified' : 'same';

@@ -21,6 +21,14 @@ describe('classifyDiff', () => {
   it('does not mark paired directories modified', () => {
     assert.equal(classifyDiff({ type: 'directory', local: {}, remote: {} }, true), 'same');
   });
+
+  it('detects a file and folder collision at the same path', () => {
+    assert.equal(classifyDiff({
+      type: 'directory',
+      local: { type: 'file', size: 10 },
+      remote: { type: 'directory' }
+    }), 'type-changed');
+  });
 });
 
 describe('newerSide', () => {
