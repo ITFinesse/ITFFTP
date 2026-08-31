@@ -9,12 +9,73 @@ import * as path from 'path';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { transferManager } from '../core/transfer-manager';
+import type { FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { formatFileSize, isBinaryFile, isSystemFile } from '../utils/helpers';
+import { errorMessage, formatFileSize, isBinaryFile, isSystemFile } from '../utils/helpers';
 
 // Maximum file size for preview (5MB) - larger files should be downloaded
 const MAX_PREVIEW_SIZE = 5 * 1024 * 1024;
+
+interface RemoteLanguageContribution {
+  id?: unknown;
+  extensions?: unknown;
+  filenames?: unknown;
+}
+
+function stringValues(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function languageContributions(): RemoteLanguageContribution[] {
+  return vscode.extensions.all.flatMap(extension => {
+    const languages = extension.packageJSON?.contributes?.languages;
+    return Array.isArray(languages) ? languages : [];
+  });
+}
+
+const inferredLanguageByRemoteUri = new Map<string, string>();
+
+export function selectRemoteDocumentLanguage(
+  remotePath: string,
+  highlightingEnabled: boolean,
+  inferredLanguageId: string,
+  contributions: readonly RemoteLanguageContribution[] = []
+): string {
+  if (!highlightingEnabled) {
+    return 'plaintext';
+  }
+
+  if (inferredLanguageId && inferredLanguageId !== 'plaintext') {
+    return inferredLanguageId;
+  }
+
+  const fileName = path.posix.basename(remotePath.replace(/\\/g, '/')).toLowerCase();
+  let extensionMatch: { id: string; length: number } | undefined;
+
+  for (const contribution of contributions) {
+    if (typeof contribution.id !== 'string' || contribution.id.length === 0) {
+      continue;
+    }
+
+    if (stringValues(contribution.filenames).some(name => name.toLowerCase() === fileName)) {
+      return contribution.id;
+    }
+
+    for (const extension of stringValues(contribution.extensions)) {
+      const normalizedExtension = extension.toLowerCase();
+      if (
+        normalizedExtension.length > 0 &&
+        fileName.endsWith(normalizedExtension) &&
+        (!extensionMatch || normalizedExtension.length > extensionMatch.length)
+      ) {
+        extensionMatch = { id: contribution.id, length: normalizedExtension.length };
+      }
+    }
+  }
+
+  return extensionMatch?.id || inferredLanguageId || 'plaintext';
+}
 
 
 export class RemoteDocumentProvider implements vscode.TextDocumentContentProvider {
@@ -40,7 +101,7 @@ export class RemoteDocumentProvider implements vscode.TextDocumentContentProvide
   }
 
   // Store config info in URI query for multi-connection support
-  private static _configMap = new Map<string, any>();
+  private static _configMap = new Map<string, FTPConfig>();
 
   static isBinaryFile(filePath: string): boolean {
     return isBinaryFile(filePath);
@@ -50,11 +111,11 @@ export class RemoteDocumentProvider implements vscode.TextDocumentContentProvide
     return isSystemFile(filePath);
   }
 
-  static setConfigForPath(remotePath: string, config: any): void {
+  static setConfigForPath(remotePath: string, config: FTPConfig): void {
     this._configMap.set(remotePath, config);
   }
 
-  static getConfigForPath(remotePath: string): any {
+  static getConfigForPath(remotePath: string): FTPConfig | undefined {
     return this._configMap.get(remotePath);
   }
 
@@ -149,11 +210,11 @@ export class RemoteDocumentProvider implements vscode.TextDocumentContentProvide
       this._cache.set(cacheKey, textContent);
 
       return textContent;
-    } catch (error: any) {
+    } catch (error) {
       logger.error('Failed to read remote file', error);
 
       // Provide more helpful error messages
-      const errMsg = error.message || '';
+      const errMsg = errorMessage(error, '');
       if (errMsg.includes('550') || errMsg.includes('No such file')) {
         return `// Cannot read file: ${path.basename(remotePath)}\n// File not found or access denied.`;
       } else if (errMsg.includes('ENOENT')) {
@@ -188,12 +249,28 @@ export async function openRemoteFile(remotePath: string): Promise<void> {
   const uri = RemoteDocumentProvider.createUri(remotePath);
 
   try {
-    const doc = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(doc, {
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (document.languageId !== 'plaintext') {
+      inferredLanguageByRemoteUri.set(uri.toString(), document.languageId);
+    }
+    const highlightingEnabled = vscode.workspace
+      .getConfiguration('stackerftp', uri)
+      .get<boolean>('defaultSyntaxHighlighting', true);
+    const languageId = selectRemoteDocumentLanguage(
+      remotePath,
+      highlightingEnabled,
+      inferredLanguageByRemoteUri.get(uri.toString()) || document.languageId,
+      languageContributions()
+    );
+    const displayDocument = languageId === document.languageId
+      ? document
+      : await vscode.languages.setTextDocumentLanguage(document, languageId);
+
+    await vscode.window.showTextDocument(displayDocument, {
       preview: true,
       viewColumn: vscode.ViewColumn.Active
     });
-  } catch (error: any) {
-    statusBar.error(`Failed to open remote file: ${error.message}`);
+  } catch (error) {
+    statusBar.error(`Failed to open remote file: ${errorMessage(error)}`);
   }
 }

@@ -11,7 +11,7 @@ interface LogEntry {
   timestamp: Date;
   level: LogLevel;
   message: string;
-  details?: any;
+  details?: unknown;
 }
 
 class Logger {
@@ -49,19 +49,19 @@ class Logger {
     }
   }
 
-  debug(message: string, details?: any): void {
+  debug(message: string, details?: unknown): void {
     this.addLog({ timestamp: new Date(), level: 'debug', message, details });
   }
 
-  info(message: string, details?: any): void {
+  info(message: string, details?: unknown): void {
     this.addLog({ timestamp: new Date(), level: 'info', message, details });
   }
 
-  warn(message: string, details?: any): void {
+  warn(message: string, details?: unknown): void {
     this.addLog({ timestamp: new Date(), level: 'warn', message, details });
   }
 
-  error(message: string, error?: any): void {
+  error(message: string, error?: unknown): void {
     let details = error;
     if (error instanceof Error) {
       details = {

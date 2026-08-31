@@ -8,14 +8,23 @@ import { SFTPConnection } from './sftp-connection';
 import { FTPConnection } from './ftp-connection';
 import { FTPConfig, ConnectionStatus } from '../types';
 import { logger } from '../utils/logger';
+import { errorMessage } from '../utils/helpers';
 import { statusBar } from '../utils/status-bar';
 import { connectionPool } from './connection-pool';
+import { connectionEndpointIdentity } from './connection-identity';
 
 export type ConnectionLifecycleState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export interface ConnectionLifecycle {
   state: ConnectionLifecycleState;
   error?: string;
+}
+
+class ConnectionAttemptSupersededError extends Error {
+  constructor() {
+    super('Connection attempt was superseded by a newer lifecycle action');
+    this.name = 'ConnectionAttemptSupersededError';
+  }
 }
 
 export class ConnectionManager {
@@ -28,6 +37,9 @@ export class ConnectionManager {
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   private reconnectAttempts: Map<string, number> = new Map();
   private ongoingConnections: Map<string, Promise<BaseConnection>> = new Map();
+  private recoveryConnections: Map<string, Promise<BaseConnection>> = new Map();
+  private retiredConnections: WeakSet<BaseConnection> = new WeakSet();
+  private connectionGenerations: Map<string, number> = new Map();
   private connectionStates: Map<string, ConnectionLifecycle> = new Map();
 
   private _onConnectionChanged: vscode.EventEmitter<void> = new vscode.EventEmitter<void>();
@@ -47,8 +59,33 @@ export class ConnectionManager {
   }
 
   private getConnectionKey(config: FTPConfig): string {
-    const port = config.port || (config.protocol === 'sftp' ? 22 : 21);
-    return `${config.name || config.host}:${port}-${config.username}`;
+    return connectionEndpointIdentity(config);
+  }
+
+  private getConnectionGeneration(key: string): number {
+    return this.connectionGenerations.get(key) || 0;
+  }
+
+  private invalidateConnectionGeneration(key: string): number {
+    const generation = this.getConnectionGeneration(key) + 1;
+    this.connectionGenerations.set(key, generation);
+    return generation;
+  }
+
+  private isConnectionGenerationCurrent(key: string, generation: number): boolean {
+    return this.getConnectionGeneration(key) === generation;
+  }
+
+  private createConnection(config: FTPConfig): BaseConnection {
+    switch (config.protocol) {
+      case 'sftp':
+        return new SFTPConnection(config);
+      case 'ftp':
+      case 'ftps':
+        return new FTPConnection(config);
+      default:
+        throw new Error(`Unsupported protocol: ${config.protocol}`);
+    }
   }
 
   getActiveConnection(): BaseConnection | undefined {
@@ -141,18 +178,18 @@ export class ConnectionManager {
     }
 
     // Multiple connections - ask user
-    const items = activeConns.map(({ config }) => ({
+    const items = activeConns.map(({ connection, config }) => ({
       label: config.name || config.host,
       description: `${config.protocol?.toUpperCase()} • ${config.username}@${config.host}`,
-      config
+      config,
+      connection
     }));
 
     // Add "Primary" indicator
     const primaryConfig = this.getPrimaryConfig();
     if (primaryConfig) {
-      const primaryItem = items.find(i =>
-        i.config.name === primaryConfig.name && i.config.host === primaryConfig.host
-      );
+      const primaryKey = this.getConnectionKey(primaryConfig);
+      const primaryItem = items.find(i => this.getConnectionKey(i.config) === primaryKey);
       if (primaryItem) {
         primaryItem.label = `$(star-full) ${primaryItem.label} (Primary)`;
       }
@@ -164,16 +201,30 @@ export class ConnectionManager {
     });
 
     if (!selected) {return undefined;}
-
-    const conn = activeConns.find(c =>
-      c.config.name === selected.config.name && c.config.host === selected.config.host
-    );
-    return conn;
+    return { connection: selected.connection, config: selected.config };
   }
 
   async connect(config: FTPConfig): Promise<BaseConnection> {
     const key = this.getConnectionKey(config);
+    const recovery = this.recoveryConnections.get(key);
+    if (recovery) {
+      return recovery;
+    }
+
+    let generation = this.getConnectionGeneration(key);
+    if (this.manualDisconnects.has(key)) {
+      generation = this.invalidateConnectionGeneration(key);
+      this.manualDisconnects.delete(key);
+    }
+    return this.connectNewOrExisting(config, generation);
+  }
+
+  private async connectNewOrExisting(config: FTPConfig, generation: number): Promise<BaseConnection> {
+    const key = this.getConnectionKey(config);
     const displayName = config.name || config.host;
+    if (!this.isConnectionGenerationCurrent(key, generation)) {
+      throw new ConnectionAttemptSupersededError();
+    }
 
     // Check if already connected
     const existing = this.connections.get(key);
@@ -182,6 +233,12 @@ export class ConnectionManager {
       statusBar.info(`Already connected: ${displayName}`);
       return existing;
     }
+    if (existing) {
+      // A replacement owns this key from this point on. Ignore any delayed
+      // transport events emitted by the retired wrapper.
+      this.retiredConnections.add(existing);
+      this.connections.delete(key);
+    }
 
     // Check if there is an ongoing connection attempt for this key
     const ongoing = this.ongoingConnections.get(key);
@@ -189,71 +246,58 @@ export class ConnectionManager {
       return ongoing;
     }
 
-    // Use a promise to track this connection attempt
-    const connectionPromise = (async () => {
+    // Defer the attempt body until its promise is registered. Lifecycle event
+    // listeners can synchronously request disconnect/reconnect.
+    const attempt = Promise.resolve().then(async () => {
+      if (!this.isConnectionGenerationCurrent(key, generation)) {
+        throw new ConnectionAttemptSupersededError();
+      }
+
+      this.setLifecycle(key, { state: 'connecting' });
+      logger.info(`Connecting to ${displayName} (${config.protocol.toUpperCase()})`);
+
+      // If no password and no private key, prompt for password
+      const workingConfig = { ...config };
+      if (!workingConfig.password && !workingConfig.privateKeyPath) {
+        const password = await vscode.window.showInputBox({
+          prompt: `Enter password for ${workingConfig.username}@${workingConfig.host}`,
+          password: true,
+          ignoreFocusOut: true
+        });
+
+        if (password === undefined) {
+          this.setLifecycle(key, { state: 'disconnected' });
+          throw new Error('Connection cancelled - no password provided');
+        }
+
+        workingConfig.password = password;
+      }
+
+      if (!this.isConnectionGenerationCurrent(key, generation)) {
+        throw new ConnectionAttemptSupersededError();
+      }
+
+      const progress = statusBar.startProgress(`connect:${key}`, `Connecting to ${displayName}...`);
+      let connection: BaseConnection | undefined;
       try {
-        this.setLifecycle(key, { state: 'connecting' });
-        logger.info(`Connecting to ${displayName} (${config.protocol.toUpperCase()})`);
-
-        // If no password and no private key, prompt for password
-        const workingConfig = { ...config };
-        if (!workingConfig.password && !workingConfig.privateKeyPath) {
-          const password = await vscode.window.showInputBox({
-            prompt: `Enter password for ${workingConfig.username}@${workingConfig.host}`,
-            password: true,
-            ignoreFocusOut: true
-          });
-
-          if (password === undefined) {
-            throw new Error('Connection cancelled - no password provided');
-          }
-
-          workingConfig.password = password;
-        }
-
-        // Show connecting status
-        const progress = statusBar.startProgress(`connect:${key}`, `Connecting to ${displayName}...`);
-
-        // Create new connection based on protocol
-        let connection: BaseConnection;
-
-        switch (workingConfig.protocol) {
-          case 'sftp':
-            connection = new SFTPConnection(workingConfig);
-            break;
-          case 'ftp':
-          case 'ftps':
-            connection = new FTPConnection(workingConfig);
-            break;
-          default:
-            progress.fail(`Unsupported protocol: ${workingConfig.protocol}`);
-            throw new Error(`Unsupported protocol: ${workingConfig.protocol}`);
-        }
+        connection = this.createConnection(workingConfig);
+        const candidate = connection;
 
         // Set up event handlers
         let hasConnected = false;
-        connection.on('connected', () => {
+        candidate.on('connected', () => {
+          if (this.retiredConnections.has(candidate) || !this.isConnectionGenerationCurrent(key, generation)) {return;}
           hasConnected = true;
-          logger.info(`Connected to ${displayName}`);
-          this.setLifecycle(key, { state: 'connected' });
-          progress.complete(`Connected: ${displayName}`);
-          // Set as primary if first connection
-          if (!this.primaryConnectionKey) {
-            this.primaryConnectionKey = key;
-          }
-          this.manualDisconnects.delete(key);
-          this.clearReconnectState(key);
-          this.updateStatusBar();
-          this._onConnectionChanged.fire();
         });
 
-        connection.on('disconnected', () => {
+        candidate.on('disconnected', () => {
+          if (this.retiredConnections.has(candidate) || !this.isConnectionGenerationCurrent(key, generation)) {return;}
           logger.info(`Disconnected from ${config.host}`);
           this.setLifecycle(key, { state: 'disconnected' });
           statusBar.info(`Disconnected: ${displayName}`);
           // Auto-reconnect if enabled and not a manual disconnect
           if (hasConnected && !this.manualDisconnects.has(key)) {
-            this.scheduleReconnect(config, key);
+            this.scheduleReconnect(config, key, generation);
           } else {
             this.manualDisconnects.delete(key);
           }
@@ -265,65 +309,222 @@ export class ConnectionManager {
           this._onConnectionChanged.fire();
         });
 
-        connection.on('error', (error) => {
+        candidate.on('error', (error) => {
+          if (this.retiredConnections.has(candidate) || !this.isConnectionGenerationCurrent(key, generation)) {return;}
           logger.error(`Connection error on ${config.host}`, error);
           this.setLifecycle(key, { state: 'error', error: error.message });
           statusBar.error(`Error: ${error.message}`, true);
         });
 
-        // Connect
-        try {
-          await this.connectWithTimeout(connection, workingConfig);
-          this.connections.set(key, connection);
-          this.activeConnectionKey = key;
-          return connection;
-        } catch (error: any) {
-          const message = error?.message || String(error);
-          this.setLifecycle(key, { state: 'error', error: message });
-          logger.error(`Connection failed for ${displayName}`, error);
-          progress.fail(`Connection failed: ${displayName}`);
-          throw error;
+        await this.connectWithTimeout(candidate, workingConfig);
+        if (!this.isConnectionGenerationCurrent(key, generation)) {
+          this.retiredConnections.add(candidate);
+          await candidate.disconnect().catch(() => {});
+          throw new ConnectionAttemptSupersededError();
         }
-      } finally {
-        // Remove from ongoing connections map either way
+
+        hasConnected = true;
+        this.connections.set(key, candidate);
+        this.activeConnectionKey = key;
+        if (!this.primaryConnectionKey) {this.primaryConnectionKey = key;}
+        this.manualDisconnects.delete(key);
+        this.clearReconnectState(key);
+        logger.info(`Connected to ${displayName}`);
+        this.setLifecycle(key, { state: 'connected' });
+        if (!this.isConnectionGenerationCurrent(key, generation)) {
+          this.retiredConnections.add(candidate);
+          if (this.connections.get(key) === candidate) {
+            this.connections.delete(key);
+            await candidate.disconnect().catch(() => {});
+          }
+          throw new ConnectionAttemptSupersededError();
+        }
+        progress.complete(`Connected: ${displayName}`);
+        this.updateStatusBar();
+        this._onConnectionChanged.fire();
+        return candidate;
+      } catch (error) {
+        if (!this.isConnectionGenerationCurrent(key, generation) || error instanceof ConnectionAttemptSupersededError) {
+          if (connection) {this.retiredConnections.add(connection);}
+          throw new ConnectionAttemptSupersededError();
+        }
+        const message = errorMessage(error);
+        this.setLifecycle(key, { state: 'error', error: message });
+        logger.error(`Connection failed for ${displayName}`, error);
+        progress.fail(`Connection failed: ${displayName}`);
+        throw error;
+      }
+    });
+
+    const connectionPromise = attempt.finally(() => {
+      if (this.ongoingConnections.get(key) === connectionPromise) {
         this.ongoingConnections.delete(key);
       }
-    })();
-
+    });
     this.ongoingConnections.set(key, connectionPromise);
     return connectionPromise;
+  }
+
+  /**
+   * Retire a manager-owned connection whose transport has been classified as
+   * closed, then establish a fresh primary session for the same config.
+   *
+   * This is deliberately different from a manual disconnect: pooled transfer
+   * sessions remain available and automatic lifecycle state is preserved.
+   */
+  async invalidateAndReconnect(config: FTPConfig, failedConnection: BaseConnection): Promise<BaseConnection> {
+    const key = this.getConnectionKey(config);
+    const existingRecovery = this.recoveryConnections.get(key);
+    if (existingRecovery) {
+      return existingRecovery;
+    }
+
+    const generation = this.getConnectionGeneration(key);
+    const recoveryAttempt = Promise.resolve().then(async () => {
+      try {
+        if (!this.isConnectionGenerationCurrent(key, generation)) {
+          throw new ConnectionAttemptSupersededError();
+        }
+        const current = this.connections.get(key);
+        if (current === failedConnection) {
+          const displayName = config.name || config.host;
+          this.retiredConnections.add(failedConnection);
+          this.connections.delete(key);
+          this.clearReconnectState(key);
+
+          if (this.activeConnectionKey === key) {
+            this.activeConnectionKey = undefined;
+          }
+          if (this.primaryConnectionKey === key) {
+            this.primaryConnectionKey = undefined;
+          }
+
+          this.setLifecycle(key, { state: 'disconnected' });
+          statusBar.info(`Disconnected: ${displayName}`);
+          this.updateStatusBar();
+          this._onConnectionChanged.fire();
+
+          await failedConnection.disconnect().catch(disconnectError => {
+            logger.warn(`Failed to close invalidated connection to ${config.host}`, disconnectError);
+          });
+        }
+
+        if (!this.isConnectionGenerationCurrent(key, generation)) {
+          throw new ConnectionAttemptSupersededError();
+        }
+        return await this.connectNewOrExisting(config, generation);
+      } catch (error) {
+        if (this.isConnectionGenerationCurrent(key, generation)
+          && !this.manualDisconnects.has(key)
+          && !(error instanceof ConnectionAttemptSupersededError)) {
+          this.scheduleReconnect(config, key, generation);
+        }
+        throw error;
+      }
+    });
+
+    const recovery = recoveryAttempt.finally(() => {
+      if (this.recoveryConnections.get(key) === recovery) {
+        this.recoveryConnections.delete(key);
+      }
+    });
+    this.recoveryConnections.set(key, recovery);
+    return recovery;
+  }
+
+  /**
+   * Validate credentials and the configured remote path without registering a
+   * primary connection or disturbing an existing manager/pool session.
+   */
+  async testConnection(config: FTPConfig): Promise<void> {
+    const workingConfig = { ...config };
+    if (!workingConfig.password && !workingConfig.privateKeyPath) {
+      const password = await vscode.window.showInputBox({
+        prompt: `Enter password for ${workingConfig.username}@${workingConfig.host}`,
+        password: true,
+        ignoreFocusOut: true
+      });
+
+      if (password === undefined) {
+        throw new Error('Connection cancelled - no password provided');
+      }
+      workingConfig.password = password;
+    }
+
+    const connection = this.createConnection(workingConfig);
+
+    connection.on('error', error => {
+      logger.error(`Transient connection test failed for ${workingConfig.host}`, error);
+    });
+
+    try {
+      await this.connectWithTimeout(connection, workingConfig);
+      await connection.list(workingConfig.remotePath || '/');
+    } finally {
+      await connection.disconnect().catch(disconnectError => {
+        logger.warn(`Failed to close transient connection to ${workingConfig.host}`, disconnectError);
+      });
+    }
   }
 
   async disconnect(config?: FTPConfig): Promise<void> {
     if (config) {
       const key = this.getConnectionKey(config);
       const connection = this.connections.get(key);
+      const disconnectGeneration = this.invalidateConnectionGeneration(key);
+      this.manualDisconnects.add(key);
+      this.clearReconnectState(key);
+      this.ongoingConnections.delete(key);
+      this.recoveryConnections.delete(key);
       if (connection) {
-        this.manualDisconnects.add(key);
-        this.clearReconnectState(key);
-        await connectionPool.drain(config);
-        await connection.disconnect();
+        this.retiredConnections.add(connection);
         this.connections.delete(key);
-        if (this.activeConnectionKey === key) {
-          this.activeConnectionKey = undefined;
-        }
-        if (this.primaryConnectionKey === key) {
-          this.primaryConnectionKey = undefined;
+        if (this.activeConnectionKey === key) {this.activeConnectionKey = undefined;}
+        if (this.primaryConnectionKey === key) {this.primaryConnectionKey = undefined;}
+      }
+      try {
+        await connectionPool.drain(config);
+        if (connection) {await connection.disconnect();}
+      } finally {
+        if (this.isConnectionGenerationCurrent(key, disconnectGeneration)) {
+          this.manualDisconnects.delete(key);
+          if (!this.connections.get(key)?.connected) {
+            this.setLifecycle(key, { state: 'disconnected' });
+          }
         }
       }
-      this.setLifecycle(key, { state: 'disconnected' });
     } else {
       // Disconnect all
-      await connectionPool.drainAll();
-      for (const [key, connection] of this.connections) {
+      const connections = [...this.connections.entries()];
+      const keys = new Set([
+        ...this.connections.keys(),
+        ...this.ongoingConnections.keys(),
+        ...this.recoveryConnections.keys(),
+        ...this.reconnectTimers.keys(),
+        ...this.connectionStates.keys()
+      ]);
+      const disconnectGenerations = new Map<string, number>();
+      for (const key of keys) {
+        disconnectGenerations.set(key, this.invalidateConnectionGeneration(key));
         this.manualDisconnects.add(key);
         this.clearReconnectState(key);
-        await connection.disconnect();
+        this.ongoingConnections.delete(key);
+        this.recoveryConnections.delete(key);
       }
+      for (const [, connection] of connections) {this.retiredConnections.add(connection);}
       this.connections.clear();
       this.activeConnectionKey = undefined;
       this.primaryConnectionKey = undefined;
-      this.connectionStates.clear();
+      try {
+        await connectionPool.drainAll();
+        await Promise.all(connections.map(([, connection]) => connection.disconnect()));
+      } finally {
+        for (const [key, generation] of disconnectGenerations) {
+          if (!this.isConnectionGenerationCurrent(key, generation)) {continue;}
+          this.manualDisconnects.delete(key);
+          if (!this.connections.get(key)?.connected) {this.connectionStates.delete(key);}
+        }
+      }
     }
     this.updateStatusBar();
     this._onConnectionChanged.fire();
@@ -394,8 +595,10 @@ export class ConnectionManager {
     return this.connect(config);
   }
 
-  private scheduleReconnect(config: FTPConfig, key: string): void {
-    if (config.autoReconnect === false) {return;}
+  private scheduleReconnect(config: FTPConfig, key: string, generation = this.getConnectionGeneration(key)): void {
+    if (config.autoReconnect === false
+      || this.manualDisconnects.has(key)
+      || !this.isConnectionGenerationCurrent(key, generation)) {return;}
 
     // Avoid auto reconnect if no credentials are available
     if (!config.password && !config.privateKeyPath) {
@@ -413,6 +616,7 @@ export class ConnectionManager {
 
     const timer = setTimeout(async () => {
       this.reconnectTimers.delete(key);
+      if (this.manualDisconnects.has(key) || !this.isConnectionGenerationCurrent(key, generation)) {return;}
       try {
         const existing = this.getConnection(config);
         if (existing && existing.connected) {
@@ -422,7 +626,7 @@ export class ConnectionManager {
         await this.connect(config);
       } catch (error) {
         logger.warn(`Reconnect attempt ${attempt} failed for ${config.host}`, error);
-        this.scheduleReconnect(config, key);
+        this.scheduleReconnect(config, key, generation);
       }
     }, delay);
 
@@ -438,10 +642,7 @@ export class ConnectionManager {
     this.reconnectAttempts.delete(key);
   }
 
-  /**
-   * Acquire a pooled connection for parallel transfers.
-   * Falls back to the primary connection if pool creation fails.
-   */
+  /** Acquire a connection for an additional parallel transfer worker. */
   async getPooledConnection(config: FTPConfig): Promise<BaseConnection> {
     // Ensure primary connection exists first
     const primary = this.getConnection(config);
@@ -457,14 +658,29 @@ export class ConnectionManager {
       return primary;
     }
 
-    try {
-      const configuredConcurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
-      const poolSize = Math.min(100, Math.max(1, Math.round(configuredConcurrency)));
-      return await connectionPool.acquire(primaryConfig, poolSize);
-    } catch (error) {
-      logger.warn(`Pool acquire failed for ${config.host}, falling back to primary connection`, error);
-      return primary;
+    return this.getStrictPooledConnection(config);
+  }
+
+  /** Acquire a distinct pooled FTP session without reusing the primary. */
+  async getStrictPooledConnection(config: FTPConfig): Promise<BaseConnection> {
+    const primary = this.getConnection(config);
+    if (!primary || !primary.connected) {
+      throw new Error(`No active connection for ${config.host}`);
     }
+
+    const primaryConfig = primary.getConfig();
+    if (primaryConfig.protocol === 'sftp') {
+      throw new Error('SFTP comparison scans must use the serial primary connection');
+    }
+
+    const configuredConcurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
+    const poolSize = Math.min(100, Math.max(1, Math.round(configuredConcurrency)));
+    const pooled = await connectionPool.acquire(primaryConfig, poolSize);
+    if (this.getConnection(config) !== primary || !primary.connected) {
+      await connectionPool.discard(primaryConfig, pooled);
+      throw new ConnectionAttemptSupersededError();
+    }
+    return pooled;
   }
 
   /**
@@ -477,6 +693,15 @@ export class ConnectionManager {
       return;
     }
     connectionPool.release(config, connection);
+  }
+
+  /** Close and remove one failed pooled transport without draining siblings. */
+  async discardPooledConnection(config: FTPConfig, connection: BaseConnection): Promise<void> {
+    const primary = this.getConnection(config);
+    if (primary === connection) {
+      throw new Error('Cannot discard the manager-owned primary as a pooled connection');
+    }
+    await connectionPool.discard(config, connection);
   }
 
   dispose(): void {

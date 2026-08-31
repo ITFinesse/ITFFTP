@@ -77,6 +77,7 @@ export class TransferQueueTreeProvider implements vscode.TreeDataProvider<Transf
 
     private disposables: vscode.Disposable[] = [];
     private treeView: vscode.TreeView<TransferTreeItem>;
+    private readonly refreshListener = (): void => this.refresh();
 
     constructor() {
         // Create tree view
@@ -87,12 +88,22 @@ export class TransferQueueTreeProvider implements vscode.TreeDataProvider<Transf
         });
 
         // Listen to transfer manager events
-        transferManager.on('queueUpdate', () => this.refresh());
-        transferManager.on('transferStart', () => this.refresh());
-        transferManager.on('transferComplete', () => this.refresh());
-        transferManager.on('transferProgress', () => this.refresh());
+        transferManager.on('queueUpdate', this.refreshListener);
+        transferManager.on('transferStart', this.refreshListener);
+        transferManager.on('transferComplete', this.refreshListener);
+        transferManager.on('transferProgress', this.refreshListener);
 
-        this.disposables.push(this.treeView);
+        this.disposables.push(
+            this.treeView,
+            {
+                dispose: () => {
+                    transferManager.removeListener('queueUpdate', this.refreshListener);
+                    transferManager.removeListener('transferStart', this.refreshListener);
+                    transferManager.removeListener('transferComplete', this.refreshListener);
+                    transferManager.removeListener('transferProgress', this.refreshListener);
+                }
+            }
+        );
     }
 
     refresh(): void {
@@ -151,10 +162,10 @@ export class TransferQueueTreeProvider implements vscode.TreeDataProvider<Transf
     }
 
     /**
-     * Show/reveal the transfer queue panel
+     * Show the live queue without targeting the retired hidden TreeView.
      */
     reveal(): void {
-        this.treeView.reveal(undefined as any, { focus: true });
+        void vscode.commands.executeCommand('stackerftp.transferQueue');
     }
 
     /**

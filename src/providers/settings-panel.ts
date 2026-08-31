@@ -6,16 +6,23 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { logger } from '../utils/logger';
-import { statusBar } from '../utils/status-bar';
 import { configManager } from '../core/config';
 import { transferManager } from '../core/transfer-manager';
 import { connectionManager } from '../core/connection-manager';
 import { AnalyticsStore } from '../core/analytics-store';
-import { classifyDiff, newerSide, shouldSyncDiff } from '../core/diff-comparison';
+import { classifyDiff, collapseRecursiveTransfers, newerSide, shouldSyncDiff } from '../core/diff-comparison';
+import { parseConfiguredConnections, parseReusableRemotes, resolveConfiguredConnection } from '../core/config-contract';
+import {
+  DEFAULT_MAX_SCAN_DEPTH,
+  DEFAULT_MAX_SCAN_DIRECTORIES,
+  runBoundedRecursiveScan
+} from '../core/recursive-scan';
+import { normalizeRemoteRelativePath, safeRemoteEntryName } from '../core/remote-path';
 import { BaseConnection } from '../core/connection';
-import { isConnectionClosedError } from '../core/connection-errors';
-import { FTPConfig } from '../types';
-import { DEFAULT_IGNORE_PATTERNS, isPathIgnored } from '../utils/helpers';
+import { isConnectionClosedError, isRemoteMissingError, isRemoteNotDirectoryError } from '../core/connection-errors';
+import { isGeneratedWatcherWrite } from '../core/watcher-suppression';
+import { FTPConfig, StoredFTPConfig, SyncResult, TransferOutcome } from '../types';
+import { DEFAULT_IGNORE_PATTERNS, errorMessage, isPathIgnored, joinRemotePath } from '../utils/helpers';
 
 type SettingsSavedHandler = (scope: vscode.Uri) => Promise<void> | void;
 
@@ -26,6 +33,13 @@ type DiffEntry = {
   modifyTime?: number;
 };
 
+type DiffSignature = Omit<DiffEntry, 'path'>;
+
+type SynchronizedSignatures = {
+  local: DiffSignature;
+  remote: DiffSignature;
+};
+
 type DiffRecord = {
   path: string;
   type: 'file' | 'directory';
@@ -33,6 +47,29 @@ type DiffRecord = {
   remote?: Omit<DiffEntry, 'path'>;
   status: 'same' | 'missing-local' | 'missing-remote' | 'modified' | 'type-changed';
   newer?: 'local' | 'remote';
+  synchronized?: SynchronizedSignatures;
+};
+
+type DiffTransferCandidate = {
+  path: string;
+  type: 'file' | 'directory';
+  record: DiffRecord;
+};
+
+type ComparisonCacheWrite = {
+  file: vscode.Uri;
+  expectedCacheKey: string;
+  generation: number;
+  revision: number;
+  records: DiffRecord[];
+};
+
+type WatchedRefreshBatch = {
+  config: FTPConfig;
+  generation: number;
+  targets: Map<string, boolean>;
+  verifyDirtyContent: boolean;
+  synchronizedPaths: Set<string>;
 };
 
 type DashboardJob = {
@@ -44,7 +81,25 @@ type DashboardJob = {
   endTime?: number;
 };
 
-const DIFF_CACHE_VERSION = 2;
+type DashboardSettingsInput = Partial<Record<typeof SETTING_KEYS[number] | 'connections' | 'dashboardZoom', unknown>>;
+
+type SettingsPanelMessage = {
+  type?: string;
+  action?: unknown;
+  connection?: unknown;
+  connections?: unknown;
+  direction?: unknown;
+  force?: unknown;
+  kind?: unknown;
+  path?: unknown;
+  projectId?: unknown;
+  requestId?: unknown;
+  selectedOnly?: unknown;
+  settings?: DashboardSettingsInput;
+};
+
+const DIFF_CACHE_VERSION = 4;
+const MAX_FTP_SCAN_CONCURRENCY = 4;
 
 const SETTING_KEYS = [
   'autoConnect',
@@ -56,7 +111,6 @@ const SETTING_KEYS = [
   'showWebMasterTools',
   'enableFileWatcher',
   'defaultSyntaxHighlighting',
-  'useNativeTreeView',
   'downloadWhenOpenInRemoteExplorer',
   'transferConcurrency',
   'remoteExplorerSortOrder'
@@ -72,7 +126,6 @@ const DEFAULT_SETTINGS = {
   showWebMasterTools: true,
   enableFileWatcher: false,
   defaultSyntaxHighlighting: true,
-  useNativeTreeView: true,
   downloadWhenOpenInRemoteExplorer: false,
   transferConcurrency: 4,
   remoteExplorerSortOrder: 'name',
@@ -84,24 +137,28 @@ export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private scope?: vscode.Uri;
   private diffRefreshRunning = false;
-  private pendingDiffRefresh?: { value: unknown; generation: number; key: string };
+  private pendingDiffRefresh?: { value: unknown; generation: number; key: string; forceDirectoryCacheRefresh: boolean };
   private hasPendingDiffRefresh = false;
   private diffScanGeneration = 0;
+  private comparisonRevision = 0;
+  private diffScanTail: Promise<void> = Promise.resolve();
+  private activeDiffProgressGeneration?: number;
   private activeDiffRequestKey?: string;
   private readonly diffDirectoryCache = new Map<string, DiffEntry[]>();
+  private readonly diffScanConnectionTails = new WeakMap<BaseConnection, Promise<void>>();
   private readonly latestDiffRecords = new Map<string, DiffRecord>();
   private localWatcher?: vscode.FileSystemWatcher;
   private readonly localRefreshTimers = new Map<string, NodeJS.Timeout>();
+  private readonly comparisonCacheWriteTails = new Map<string, Promise<void>>();
   private cacheWriteTimer?: NodeJS.Timeout;
   private backgroundRefreshTimer?: NodeJS.Timeout;
   private watchedRefreshTimer?: NodeJS.Timeout;
-  private watchedRefreshConfig?: FTPConfig;
+  private readonly watchedRefreshBatches = new Map<string, WatchedRefreshBatch>();
+  private readonly pendingSynchronizedPaths = new Map<string, Set<string>>();
+  private watchedRefreshRunning = false;
   private lastBackgroundRefreshAt = 0;
   private activeComparisonCacheKey?: string;
   private readonly localDirtyPaths = new Set<string>();
-  // Retained while legacy folder messages are accepted; all dashboard scans use
-  // scanComparison above and therefore never enter this path.
-  private readonly diffFullScans = new Set<string>();
   private analyticsProjectFilter = 'all';
   private transferQueueExpiryTimer?: NodeJS.Timeout;
   private readonly dashboardJobs = new Map<string, DashboardJob>();
@@ -110,8 +167,12 @@ export class SettingsPanel implements vscode.Disposable {
     if (!this.panel) {return;}
     const queue = transferManager.getQueue();
     const now = Date.now();
-    const visible = queue.filter(item => item.status === 'pending' || item.status === 'transferring'
-      || ((item.status === 'completed' || item.status === 'error') && item.endTime && now - item.endTime.getTime() < 8000));
+    const visible = queue.filter(item => {
+      const itemStatus = String(item.status);
+      return itemStatus === 'pending' || itemStatus === 'transferring'
+        || ((itemStatus === 'completed' || itemStatus === 'skipped' || itemStatus === 'cancelled' || itemStatus === 'error')
+          && item.endTime && now - item.endTime.getTime() < 8000);
+    });
     for (const [id, job] of this.dashboardJobs) {
       if (job.endTime && now - job.endTime >= 8000) {this.dashboardJobs.delete(id);}
     }
@@ -121,7 +182,8 @@ export class SettingsPanel implements vscode.Disposable {
       items: [...visible.map(item => {
         const remoteRoot = (item.config?.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
         const normalized = item.remotePath.replace(/\\/g, '/');
-        const relativePath = normalized.startsWith(`${remoteRoot}/`) ? normalized.slice(remoteRoot.length + 1) : normalized.replace(/^\/+/, '');
+        const remotePrefix = remoteRoot === '/' ? '/' : `${remoteRoot}/`;
+        const relativePath = normalized.startsWith(remotePrefix) ? normalized.slice(remotePrefix.length) : normalized.replace(/^\/+/, '');
         return {
           id: item.id,
           path: relativePath || normalized,
@@ -133,7 +195,8 @@ export class SettingsPanel implements vscode.Disposable {
         };
       }), ...dashboardJobs]
     });
-    if (visible.some(item => item.status === 'completed' || item.status === 'error') || dashboardJobs.some(item => item.endTime)) {
+    if (visible.some(item => ['completed', 'skipped', 'cancelled', 'error'].includes(String(item.status)))
+      || dashboardJobs.some(item => item.endTime)) {
       if (this.transferQueueExpiryTimer) {clearTimeout(this.transferQueueExpiryTimer);}
       this.transferQueueExpiryTimer = setTimeout(() => this.transferProgressListener(), 8100);
     }
@@ -210,6 +273,13 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   public dispose(): void {
+    const activeProgressGeneration = this.activeDiffProgressGeneration;
+    this.diffScanGeneration++;
+    if (activeProgressGeneration !== undefined) {
+      this.finishDiffScanProgress(activeProgressGeneration, 'Comparison cancelled');
+    }
+    this.watchedRefreshBatches.clear();
+    this.pendingSynchronizedPaths.clear();
     this.localWatcher?.dispose();
     for (const timer of this.localRefreshTimers.values()) {clearTimeout(timer);}
     this.localRefreshTimers.clear();
@@ -225,7 +295,20 @@ export class SettingsPanel implements vscode.Disposable {
 
   public initialize(scope: vscode.Uri): void {
     const changedScope = this.scope?.toString() !== scope.toString();
-    if (changedScope) {this.diffScanGeneration++;}
+    if (changedScope) {
+      const activeProgressGeneration = this.activeDiffProgressGeneration;
+      this.diffScanGeneration++;
+      this.comparisonRevision++;
+      this.latestDiffRecords.clear();
+      this.localDirtyPaths.clear();
+      this.diffDirectoryCache.clear();
+      this.pendingSynchronizedPaths.clear();
+      this.activeComparisonCacheKey = undefined;
+      this.sendComparisonSnapshot();
+      if (activeProgressGeneration !== undefined) {
+        this.finishDiffScanProgress(activeProgressGeneration, 'Comparison cancelled');
+      }
+    }
     this.scope = scope;
     if (changedScope || !this.localWatcher) {this.ensureLocalWatcher(scope);}
     const config = configManager.getConfigs(scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(scope.fsPath)[0];
@@ -257,6 +340,10 @@ export class SettingsPanel implements vscode.Disposable {
     this.localWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(scope, '**/*'));
     const changed = (uri: vscode.Uri): void => {
       if (!this.scope || !uri.fsPath.startsWith(this.scope.fsPath)) {return;}
+      if (isGeneratedWatcherWrite(uri.fsPath)) {
+        logger.debug('ITFFTP-generated local write ignored by Transfer comparison watcher');
+        return;
+      }
       const configs = configManager.getConfigs(this.scope.fsPath);
       const activeConfig = configs.find(candidate => candidate.default) || configs[0];
       if (!activeConfig) {return;}
@@ -283,9 +370,58 @@ export class SettingsPanel implements vscode.Disposable {
 
   private cacheFile(config: FTPConfig): vscode.Uri | undefined {
     if (!this.globalStorageUri || !this.scope) {return undefined;}
-    const identity = [this.scope.toString(), config.protocol, config.host, config.port || '', config.localPath || '.', config.remotePath || '/', ...(config.ignore || [])].join('\n');
+    const identity = [this.scope.toString(), config.protocol, config.host, config.port || '', config.username || '', config.localPath || '.', config.remotePath || '/', ...(config.ignore || [])].join('\n');
     const key = crypto.createHash('sha256').update(identity).digest('hex');
     return vscode.Uri.joinPath(this.globalStorageUri, 'diff-cache', `${key}.json`);
+  }
+
+  private diffDirectoryCacheKey(config: FTPConfig, remoteDirectory: string): string {
+    return JSON.stringify([
+      config.protocol,
+      config.host,
+      config.port || '',
+      config.username || '',
+      remoteDirectory,
+      ...(config.ignore || [])
+    ]);
+  }
+
+  private beginDiffScanProgress(generation: number): void {
+    this.activeDiffProgressGeneration = generation;
+    this.panel?.webview.postMessage({
+      type: 'diffTransferProgress',
+      active: true,
+      label: 'Comparing local and remote files…',
+      percentage: 0
+    });
+  }
+
+  private finishDiffScanProgress(generation: number, label: string, percentage?: number): void {
+    if (this.activeDiffProgressGeneration !== generation) {return;}
+    this.activeDiffProgressGeneration = undefined;
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label, percentage });
+  }
+
+  private activateComparisonIdentity(cacheKey: string): void {
+    if (this.activeComparisonCacheKey === cacheKey) {return;}
+    const activeProgressGeneration = this.activeDiffProgressGeneration;
+    this.diffScanGeneration++;
+    this.comparisonRevision++;
+    this.latestDiffRecords.clear();
+    this.localDirtyPaths.clear();
+    this.diffDirectoryCache.clear();
+    for (const pendingKey of [...this.pendingSynchronizedPaths.keys()]) {
+      if (pendingKey !== cacheKey) {this.pendingSynchronizedPaths.delete(pendingKey);}
+    }
+    if (this.cacheWriteTimer) {
+      clearTimeout(this.cacheWriteTimer);
+      this.cacheWriteTimer = undefined;
+    }
+    this.activeComparisonCacheKey = cacheKey;
+    this.sendComparisonSnapshot();
+    if (activeProgressGeneration !== undefined) {
+      this.finishDiffScanProgress(activeProgressGeneration, 'Comparison cancelled');
+    }
   }
 
   private async loadCachedComparison(config: FTPConfig): Promise<void> {
@@ -296,19 +432,21 @@ export class SettingsPanel implements vscode.Disposable {
       this.sendComparisonSnapshot();
       return;
     }
-    if (this.activeComparisonCacheKey !== cacheKey) {
-      this.latestDiffRecords.clear();
-      this.diffDirectoryCache.clear();
-      this.activeComparisonCacheKey = cacheKey;
-    }
+    this.activateComparisonIdentity(cacheKey);
+    const expectedRevision = this.comparisonRevision;
     try {
       const parsed = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(file)));
       if (parsed?.version !== DIFF_CACHE_VERSION || !Array.isArray(parsed.records)) {return;}
+      if (this.activeComparisonCacheKey !== cacheKey || this.comparisonRevision !== expectedRevision) {return;}
+      const records = new Map<string, DiffRecord>();
       for (const record of parsed.records) {
         if (record && typeof record.path === 'string' && (record.type === 'file' || record.type === 'directory')) {
-          this.latestDiffRecords.set(record.path, record as DiffRecord);
+          records.set(record.path, record as DiffRecord);
         }
       }
+      this.latestDiffRecords.clear();
+      for (const [recordPath, record] of records) {this.latestDiffRecords.set(recordPath, record);}
+      this.comparisonRevision++;
       logger.info(`ITFFTP comparison cache loaded: ${this.latestDiffRecords.size} paths`);
       this.sendComparisonSnapshot();
     } catch {
@@ -316,25 +454,63 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private scheduleComparisonCacheWrite(config: FTPConfig): void {
+  private scheduleComparisonCacheWrite(config: FTPConfig, generation: number, revision: number, completedRecords: Iterable<DiffRecord>): void {
+    const file = this.cacheFile(config);
+    if (!file) {return;}
+    const write: ComparisonCacheWrite = {
+      file,
+      expectedCacheKey: file.toString(),
+      generation,
+      revision,
+      records: [...completedRecords].map(record => ({
+        ...record,
+        local: record.local ? { ...record.local } : undefined,
+        remote: record.remote ? { ...record.remote } : undefined,
+        synchronized: record.synchronized ? {
+          local: { ...record.synchronized.local },
+          remote: { ...record.synchronized.remote }
+        } : undefined
+      }))
+    };
     if (this.cacheWriteTimer) {clearTimeout(this.cacheWriteTimer);}
     this.cacheWriteTimer = setTimeout(() => {
       this.cacheWriteTimer = undefined;
-      void this.persistComparisonCache(config);
+      this.enqueueComparisonCacheWrite(write);
     }, 300);
   }
 
-  private async persistComparisonCache(config: FTPConfig): Promise<void> {
-    const file = this.cacheFile(config);
-    if (!file) {return;}
+  private enqueueComparisonCacheWrite(write: ComparisonCacheWrite): void {
+    const previous = this.comparisonCacheWriteTails.get(write.expectedCacheKey) || Promise.resolve();
+    const pending = previous
+      .catch(() => undefined)
+      .then(() => this.persistComparisonCache(write));
+    this.comparisonCacheWriteTails.set(write.expectedCacheKey, pending);
+    void pending.finally(() => {
+      if (this.comparisonCacheWriteTails.get(write.expectedCacheKey) === pending) {
+        this.comparisonCacheWriteTails.delete(write.expectedCacheKey);
+      }
+    });
+  }
+
+  private async persistComparisonCache(write: ComparisonCacheWrite): Promise<void> {
+    if (write.generation !== this.diffScanGeneration
+      || write.revision !== this.comparisonRevision
+      || write.expectedCacheKey !== this.activeComparisonCacheKey) {return;}
+    const { file } = write;
     const temporary = vscode.Uri.joinPath(
       vscode.Uri.joinPath(this.globalStorageUri!, 'diff-cache'),
       `${file.path.split('/').pop()}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`
     );
     try {
-      const payload = JSON.stringify({ version: DIFF_CACHE_VERSION, updatedAt: new Date().toISOString(), records: [...this.latestDiffRecords.values()] });
+      const payload = JSON.stringify({ version: DIFF_CACHE_VERSION, updatedAt: new Date().toISOString(), revision: write.revision, records: write.records });
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.globalStorageUri!, 'diff-cache'));
       await vscode.workspace.fs.writeFile(temporary, new TextEncoder().encode(payload));
+      if (write.generation !== this.diffScanGeneration
+        || write.revision !== this.comparisonRevision
+        || write.expectedCacheKey !== this.activeComparisonCacheKey) {
+        await vscode.workspace.fs.delete(temporary);
+        return;
+      }
       await vscode.workspace.fs.rename(temporary, file, { overwrite: true });
     } catch (error) {
       logger.warn('Unable to persist ITFFTP comparison cache', error);
@@ -342,34 +518,173 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  public async refreshWatchedPath(config: FTPConfig, relativePath: string): Promise<void> {
-    if (!relativePath || relativePath.includes('../')) {return;}
-    this.watchedRefreshConfig = config;
+  public canAutoDownload(config: FTPConfig, relativePath: string): boolean {
+    const normalized = normalizeRemoteRelativePath(relativePath);
+    if (!normalized) {return false;}
+    const cacheKey = this.cacheFile(config)?.toString();
+    if (cacheKey && this.activeComparisonCacheKey && cacheKey !== this.activeComparisonCacheKey) {return true;}
+    return !this.localDirtyPaths.has(normalized);
+  }
+
+  public async refreshWatchedPath(
+    config: FTPConfig,
+    relativePath: string,
+    verifyDirtyContent = false,
+    kind?: 'file' | 'directory',
+    completedDirection?: 'upload' | 'download'
+  ): Promise<void> {
+    const normalized = normalizeRemoteRelativePath(relativePath);
+    if (!normalized) {return;}
+    const key = this.cacheFile(config)?.toString() || JSON.stringify([
+      this.scope?.toString() || '',
+      config.protocol,
+      config.host,
+      config.port || '',
+      config.username || '',
+      config.localPath || '.',
+      config.remotePath || '/',
+      ...(config.ignore || [])
+    ]);
+    if (this.activeComparisonCacheKey && key !== this.activeComparisonCacheKey) {
+      logger.debug('ITFFTP watcher comparison refresh ignored for an inactive Transfer identity');
+      return;
+    }
+    let batch = this.watchedRefreshBatches.get(key);
+    if (!batch || batch.generation !== this.diffScanGeneration) {
+      batch = {
+        config,
+        generation: this.diffScanGeneration,
+        targets: new Map<string, boolean>(),
+        verifyDirtyContent: false,
+        synchronizedPaths: new Set<string>()
+      };
+      this.watchedRefreshBatches.set(key, batch);
+    }
+    batch.config = config;
+    batch.verifyDirtyContent ||= verifyDirtyContent;
+    const pendingSynchronized = this.pendingSynchronizedPaths.get(key) || new Set<string>();
+    if (completedDirection) {
+      batch.synchronizedPaths.add(normalized);
+      pendingSynchronized.add(normalized);
+      this.pendingSynchronizedPaths.set(key, pendingSynchronized);
+    } else {
+      batch.synchronizedPaths.delete(normalized);
+      if (pendingSynchronized.delete(normalized) && pendingSynchronized.size === 0) {
+        this.pendingSynchronizedPaths.delete(key);
+      }
+    }
+    const parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
+    this.addWatchedRefreshTarget(batch.targets, parent, false);
+    if (kind === 'directory' || this.latestDiffRecords.get(normalized)?.type === 'directory') {
+      this.addWatchedRefreshTarget(batch.targets, normalized, true);
+    }
     if (this.watchedRefreshTimer) {clearTimeout(this.watchedRefreshTimer);}
     this.watchedRefreshTimer = setTimeout(() => {
       this.watchedRefreshTimer = undefined;
-      const active = this.watchedRefreshConfig;
-      this.watchedRefreshConfig = undefined;
-      if (!active) {return;}
-      // A watcher event says state changed; it does not prove the two peers now
-      // match. Relist both complete trees so collapsed descendants stay correct.
-      this.diffDirectoryCache.clear();
-      void this.scanComparison(active, '', ++this.diffScanGeneration, false, true, false);
+      void this.flushWatchedRefresh();
     }, 250);
   }
 
+  private addWatchedRefreshTarget(targets: Map<string, boolean>, target: string, recursive: boolean): void {
+    for (const [existing, existingRecursive] of [...targets]) {
+      if (existing === target) {
+        targets.set(existing, existingRecursive || recursive);
+        return;
+      }
+      if (existingRecursive && target.startsWith(`${existing}/`)) {return;}
+      if (recursive && existing.startsWith(`${target}/`)) {targets.delete(existing);}
+    }
+    targets.set(target, recursive);
+  }
+
+  private async flushWatchedRefresh(): Promise<void> {
+    if (this.watchedRefreshRunning) {return;}
+    this.watchedRefreshRunning = true;
+    try {
+      while (this.watchedRefreshBatches.size) {
+        const next = this.watchedRefreshBatches.entries().next().value as [string, WatchedRefreshBatch] | undefined;
+        if (!next) {break;}
+        const [key, active] = next;
+        this.watchedRefreshBatches.delete(key);
+        if (active.generation !== this.diffScanGeneration) {continue;}
+        const targets = [...active.targets]
+          .sort(([leftPath, leftRecursive], [rightPath, rightRecursive]) => {
+            const depth = leftPath.split('/').filter(Boolean).length - rightPath.split('/').filter(Boolean).length;
+            return depth || Number(leftRecursive) - Number(rightRecursive) || leftPath.localeCompare(rightPath);
+          });
+        for (const [target, recursive] of targets) {
+          if (active.generation !== this.diffScanGeneration) {break;}
+          // Watcher work stays behind an interactive scan and re-lists only
+          // the affected parent/subtree without changing the request epoch.
+          // If a newer Full Refresh takes ownership, the remainder of this
+          // older watcher batch is already covered and must not resume later.
+          await this.scanComparison(
+            active.config,
+            target,
+            active.generation,
+            true,
+            recursive,
+            active.verifyDirtyContent,
+            { relativeDirectory: target, recursive },
+            active.synchronizedPaths.size ? active.synchronizedPaths : undefined
+          );
+        }
+      }
+    } catch (error) {
+      logger.warn('Watcher-triggered comparison refresh failed', error);
+    } finally {
+      this.watchedRefreshRunning = false;
+      if (this.watchedRefreshBatches.size && !this.watchedRefreshTimer) {
+        this.watchedRefreshTimer = setTimeout(() => {
+          this.watchedRefreshTimer = undefined;
+          void this.flushWatchedRefresh();
+        }, 250);
+      }
+    }
+  }
+
+  private invalidateDiffDirectoryCache(config: FTPConfig, relativeDirectory: string, recursive = false): void {
+    const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
+    const remoteDirectory = relativeDirectory ? joinRemotePath(root, relativeDirectory) : root;
+    const prefix = remoteDirectory === '/' ? '/' : `${remoteDirectory}/`;
+    for (const key of [...this.diffDirectoryCache.keys()]) {
+      try {
+        const parts = JSON.parse(key) as unknown[];
+        const sameProfile = parts[0] === config.protocol
+          && parts[1] === config.host
+          && parts[2] === (config.port || '')
+          && parts[3] === (config.username || '');
+        const cachedDirectory = typeof parts[4] === 'string' ? parts[4] : '';
+        if (sameProfile && (cachedDirectory === remoteDirectory || (recursive && cachedDirectory.startsWith(prefix)))) {
+          this.diffDirectoryCache.delete(key);
+        }
+      } catch {
+        // Cache keys are internal JSON tuples; discard malformed entries.
+        this.diffDirectoryCache.delete(key);
+      }
+    }
+  }
+
   private sendComparisonSnapshot(): void {
-    if (!this.panel || !this.latestDiffRecords.size) {return;}
+    if (!this.panel) {return;}
     void this.panel.webview.postMessage({ type: 'diffSnapshot', records: [...this.latestDiffRecords.values()], folders: [...this.latestDiffRecords.values()].filter(record => record.type === 'directory').length, cached: true });
   }
 
   private async refreshLocalCacheEntry(uri: vscode.Uri, config: FTPConfig): Promise<void> {
     if (!this.scope) {return;}
+    const cacheKey = this.cacheFile(config)?.toString();
+    if (cacheKey && this.activeComparisonCacheKey && cacheKey !== this.activeComparisonCacheKey) {return;}
     const relativePath = this.relativeLocalPath(uri, config);
     if (!relativePath) {return;}
-    const current = this.latestDiffRecords.get(relativePath);
+    if (cacheKey) {
+      const pendingSynchronized = this.pendingSynchronizedPaths.get(cacheKey);
+      if (pendingSynchronized?.delete(relativePath) && pendingSynchronized.size === 0) {
+        this.pendingSynchronizedPaths.delete(cacheKey);
+      }
+    }
     try {
       const stat = await vscode.workspace.fs.stat(uri);
+      const current = this.latestDiffRecords.get(relativePath);
       const type: DiffRecord['type'] = stat.type === vscode.FileType.Directory ? 'directory' : 'file';
       const record: DiffRecord = {
         path: relativePath,
@@ -378,22 +693,33 @@ export class SettingsPanel implements vscode.Disposable {
         remote: current?.remote,
         status: 'same'
       };
+      if (current?.synchronized
+        && this.signaturesMatch(record.local, current.synchronized.local)
+        && this.signaturesMatch(record.remote, current.synchronized.remote)) {
+        record.synchronized = {
+          local: { ...current.synchronized.local },
+          remote: { ...current.synchronized.remote }
+        };
+      }
       record.status = this.diffStatus(record);
       record.newer = record.status === 'modified' ? newerSide(record, this.localDirtyPaths.has(record.path)) : undefined;
+      if (record.status === 'same') {this.localDirtyPaths.delete(record.path);}
       this.latestDiffRecords.set(relativePath, record);
     } catch {
+      const current = this.latestDiffRecords.get(relativePath);
       if (current?.remote) {
-        const record: DiffRecord = { ...current, local: undefined, status: 'missing-local' };
+        const record: DiffRecord = { ...current, local: undefined, synchronized: undefined, status: 'missing-local' };
         this.latestDiffRecords.set(relativePath, record);
       } else {
         this.latestDiffRecords.delete(relativePath);
       }
     }
+    this.comparisonRevision++;
     this.sendComparisonSnapshot();
-    this.scheduleComparisonCacheWrite(config);
+    this.scheduleComparisonCacheWrite(config, this.diffScanGeneration, this.comparisonRevision, this.latestDiffRecords.values());
   }
 
-  private async handleMessage(message: any): Promise<void> {
+  private async handleMessage(message: SettingsPanelMessage): Promise<void> {
     try {
       switch (message?.type) {
         case 'ready':
@@ -421,11 +747,9 @@ export class SettingsPanel implements vscode.Disposable {
           await this.exportConnections(message.connections, Boolean(message.selectedOnly));
           break;
         case 'openCompare':
-          this.diffDirectoryCache.clear();
           await this.loadRemoteDiff(undefined, true);
           break;
         case 'loadDiffRemote':
-          if (message.force) {this.diffDirectoryCache.clear();}
           await this.loadRemoteDiff(message.connection, Boolean(message.force));
           break;
         case 'loadDiffFolder':
@@ -438,7 +762,7 @@ export class SettingsPanel implements vscode.Disposable {
           await this.createRemoteFolder(message.connection);
           break;
         case 'readDiffFile':
-          await this.readDiffFile(message.direction, message.path, message.connection);
+          await this.readDiffFile(message.direction === 'remote' ? 'remote' : 'local', message.path, message.connection);
           break;
         case 'diffAction':
           {
@@ -450,14 +774,17 @@ export class SettingsPanel implements vscode.Disposable {
               this.updateDashboardJob({ id: preparationJobId, path: String(message.path || ''), direction: transferAction, status: 'transferring', progress: 0 });
             }
             try {
-              await this.handleDiffAction(message.action, message.direction, message.path, message.connection, preparationJobId);
+              await this.handleDiffAction(String(message.action || ''), message.direction === 'remote' ? 'remote' : 'local', message.path, message.connection, preparationJobId);
             } finally {
               this.removeDashboardJob(preparationJobId);
             }
           }
           break;
         case 'diffTransfer':
-          await this.handleDiffAction(message.direction, message.direction === 'upload' ? 'local' : 'remote', message.path, message.connection);
+          {
+            const direction = message.direction === 'download' ? 'download' : 'upload';
+            await this.handleDiffAction(direction, direction === 'upload' ? 'local' : 'remote', message.path, message.connection);
+          }
           break;
         case 'syncAllChanged':
           await this.syncChanged(message.direction === 'down' ? 'down' : 'up', message.connection);
@@ -470,13 +797,12 @@ export class SettingsPanel implements vscode.Disposable {
           await this.sendAnalytics();
           break;
       }
-    } catch (error: any) {
+    } catch (error) {
       logger.error('Settings panel message handler error', error);
       this.panel?.webview.postMessage({
         type: 'saveError',
-        message: error?.message || String(error)
+        message: errorMessage(error)
       });
-      statusBar.error(`Settings error: ${error?.message || error}`);
     }
   }
 
@@ -509,7 +835,6 @@ export class SettingsPanel implements vscode.Disposable {
       showWebMasterTools: configuration.get<boolean>('showWebMasterTools', DEFAULT_SETTINGS.showWebMasterTools),
       enableFileWatcher: configuration.get<boolean>('enableFileWatcher', DEFAULT_SETTINGS.enableFileWatcher),
       defaultSyntaxHighlighting: configuration.get<boolean>('defaultSyntaxHighlighting', DEFAULT_SETTINGS.defaultSyntaxHighlighting),
-      useNativeTreeView: configuration.get<boolean>('useNativeTreeView', DEFAULT_SETTINGS.useNativeTreeView),
       downloadWhenOpenInRemoteExplorer: configuration.get<boolean>(
         'downloadWhenOpenInRemoteExplorer',
         DEFAULT_SETTINGS.downloadWhenOpenInRemoteExplorer
@@ -549,39 +874,54 @@ export class SettingsPanel implements vscode.Disposable {
     if (!this.panel || !this.scope || typeof requestId !== 'string') {return;}
     const folderKind = kind === 'remote' ? 'remote' : 'local';
     const requestedPath = String(value || (folderKind === 'remote' ? '/' : '')).replace(/\\/g, '/');
-    let entries: Array<{ name: string; path: string }> = [];
-    if (folderKind === 'local') {
-      const relative = requestedPath.replace(/^\/+|\/+$/g, '');
-      if (relative.split('/').some(segment => segment === '..')) {throw new Error('Local folder must stay inside the workspace.');}
-      const directory = relative ? vscode.Uri.joinPath(this.scope, ...relative.split('/')) : this.scope;
-      entries = (await vscode.workspace.fs.readDirectory(directory))
-        .filter(([, type]) => type === vscode.FileType.Directory)
-        .map(([name]) => ({ name, path: relative ? `${relative}/${name}` : name }))
-        .sort((left, right) => left.name.localeCompare(right.name));
-    } else {
-      const config = this.parseConnections(connectionValue)[0] || connectionManager.getPrimaryConfig();
-      if (!config) {throw new Error('Select a host before browsing remote folders.');}
-      const remotePath = `/${requestedPath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-      const connection = await connectionManager.connect(config);
-      entries = (await connection.list(remotePath))
-        .filter((entry: any) => entry.type === 'directory' && entry.name && entry.name !== '.' && entry.name !== '..')
-        .map((entry: any) => ({ name: String(entry.name), path: `${remotePath === '/' ? '' : remotePath}/${entry.name}`.replace(/\/+/g, '/') }))
-        .sort((left: { name: string }, right: { name: string }) => left.name.localeCompare(right.name));
+    try {
+      let entries: Array<{ name: string; path: string }> = [];
+      if (folderKind === 'local') {
+        const relative = requestedPath.replace(/^\/+|\/+$/g, '');
+        if (relative.split('/').some(segment => segment === '..')) {throw new Error('Local folder must stay inside the workspace.');}
+        const directory = relative ? vscode.Uri.joinPath(this.scope, ...relative.split('/')) : this.scope;
+        entries = (await vscode.workspace.fs.readDirectory(directory))
+          .filter(([, type]) => type === vscode.FileType.Directory)
+          .map(([name]) => ({ name, path: relative ? `${relative}/${name}` : name }))
+          .sort((left, right) => left.name.localeCompare(right.name));
+      } else {
+        const config = this.resolveConnections(connectionValue)[0] || connectionManager.getPrimaryConfig();
+        if (!config) {throw new Error('Select a host before browsing remote folders.');}
+        const remotePath = `/${requestedPath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+        const connection = await connectionManager.connect(config);
+        entries = (await connection.list(remotePath))
+          .flatMap(entry => {
+            const name = safeRemoteEntryName(entry.name);
+            if (entry.type !== 'directory' || !name) {return [];}
+            return [{ name, path: `${remotePath === '/' ? '' : remotePath}/${name}`.replace(/\/+/g, '/') }];
+          })
+          .sort((left: { name: string }, right: { name: string }) => left.name.localeCompare(right.name));
+      }
+      await this.panel.webview.postMessage({ type: 'folderPicker', requestId, kind: folderKind, path: requestedPath, entries });
+    } catch (error) {
+      const message = errorMessage(error);
+      logger.warn(`Unable to browse ${folderKind} folders at ${requestedPath || '/'}`, error);
+      await this.panel?.webview.postMessage({ type: 'folderPickerError', requestId, kind: folderKind, path: requestedPath, message });
     }
-    this.panel.webview.postMessage({ type: 'folderPicker', requestId, kind: folderKind, path: requestedPath, entries });
   }
 
   private async createRemoteFolder(value: unknown): Promise<void> {
-    const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+    const config = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before creating a remote folder.');}
-    const name = await vscode.window.showInputBox({ title: 'Create remote folder', prompt: `Folder name inside ${config.remotePath || '/'}`, validateInput: candidate => !candidate.trim() ? 'Enter a folder name.' : /[\\/]/.test(candidate) || candidate === '.' || candidate === '..' ? 'Enter one folder name without slashes.' : undefined });
+    const name = await vscode.window.showInputBox({
+      title: 'Create remote folder',
+      prompt: `Folder name inside ${config.remotePath || '/'}`,
+      validateInput: candidate => safeRemoteEntryName(candidate.trim())
+        ? undefined
+        : 'Enter one folder name without slashes, dot segments, or control characters.'
+    });
     if (!name) {return;}
+    const folderName = name.trim();
+    if (!safeRemoteEntryName(folderName)) {throw new Error('Remote folder name is invalid.');}
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    const remotePath = `${root === '/' ? '' : root}/${name.trim()}`.replace(/\/+/g, '/');
+    const remotePath = `${root === '/' ? '' : root}/${folderName}`.replace(/\/+/g, '/');
     const connection = await connectionManager.connect(config);
     await connection.mkdir(remotePath);
-    this.diffDirectoryCache.clear();
-    await this.scanComparison(config, '', ++this.diffScanGeneration, false, false);
     this.panel?.webview.postMessage({ type: 'remoteFolderCreated', message: `Created remote folder ${remotePath}` });
   }
 
@@ -600,6 +940,10 @@ export class SettingsPanel implements vscode.Disposable {
       logger.info(`ITFFTP dashboard workspace inventory sent (${workspaceFiles.length} entries)`);
     } catch (error) {
       logger.warn('Unable to load ITFFTP dashboard workspace inventory', error);
+      this.panel?.webview.postMessage({
+        type: 'saveError',
+        message: `Unable to load the local folder list: ${errorMessage(error)}`
+      });
     }
   }
 
@@ -608,7 +952,7 @@ export class SettingsPanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'analytics', analytics });
   }
 
-  private async saveSettings(values: any): Promise<void> {
+  private async saveSettings(values: DashboardSettingsInput = {}): Promise<void> {
     const configuration = this.getConfiguration();
     const connections = this.parseConnections(values?.connections);
     const transferConcurrency = this.parseConcurrency(values?.transferConcurrency);
@@ -625,7 +969,6 @@ export class SettingsPanel implements vscode.Disposable {
       showWebMasterTools: Boolean(values?.showWebMasterTools),
       enableFileWatcher: Boolean(values?.enableFileWatcher),
       defaultSyntaxHighlighting: Boolean(values?.defaultSyntaxHighlighting),
-      useNativeTreeView: Boolean(values?.useNativeTreeView),
       downloadWhenOpenInRemoteExplorer: Boolean(values?.downloadWhenOpenInRemoteExplorer),
       transferConcurrency,
       remoteExplorerSortOrder: sortOrder
@@ -639,7 +982,7 @@ export class SettingsPanel implements vscode.Disposable {
     await configManager.saveConfig(this.scope!.fsPath, connections);
 
     this.panel?.webview.postMessage({ type: 'saveSuccess' });
-    statusBar.success('ITFFTP settings saved automatically');
+    logger.info('ITFFTP settings saved automatically');
 
     if (this.scope && this.onSettingsSaved) {
       await this.onSettingsSaved(this.scope);
@@ -654,53 +997,56 @@ export class SettingsPanel implements vscode.Disposable {
 
     await this.sendSettings();
     this.panel?.webview.postMessage({ type: 'resetSuccess' });
-    statusBar.success('Workspace setting overrides reset');
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Workspace setting overrides reset' });
+    logger.info('Workspace setting overrides reset');
   }
 
-  private parseConnections(value: unknown): FTPConfig[] {
+  private parseConnections(value: unknown): StoredFTPConfig[] {
     let parsed: unknown = value;
     if (typeof value === 'string') {
       parsed = JSON.parse(value.trim() || '[]');
     }
 
-    const connections = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
-    for (const connection of connections) {
-      if (!connection || typeof connection !== 'object' || Array.isArray(connection)) {
-        throw new Error('Each connection must be a JSON object.');
+    if (parsed === undefined || parsed === null) {return [];}
+    const omitUndefined = (candidate: unknown): unknown => {
+      if (Array.isArray(candidate)) {return candidate.map(omitUndefined);}
+      if (!candidate || typeof candidate !== 'object') {return candidate;}
+      return Object.fromEntries(Object.entries(candidate as Record<string, unknown>)
+        .filter(([, item]) => item !== undefined)
+        .map(([key, item]) => [key, omitUndefined(item)]));
+    };
+    const normalizeLocalPath = (localPath: string | undefined): string | undefined => localPath === undefined
+      ? undefined
+      : localPath.replace(/\\/g, '/').replace(/^\.\/?$/, '').replace(/^\/+|\/+$/g, '') || undefined;
+    const connections = parseConfiguredConnections(omitUndefined(parsed)).map(connection => {
+      const normalized = { ...connection } as StoredFTPConfig;
+      const localPath = normalizeLocalPath(connection.localPath);
+      if (localPath === undefined) {delete normalized.localPath;}
+      else {normalized.localPath = localPath;}
+      if (connection.profiles) {
+        normalized.profiles = Object.fromEntries(Object.entries(connection.profiles).map(([name, profile]) => {
+          const normalizedProfile = { ...profile };
+          const profileLocalPath = normalizeLocalPath(profile.localPath);
+          if (profileLocalPath === undefined) {delete normalizedProfile.localPath;}
+          else {normalizedProfile.localPath = profileLocalPath;}
+          return [name, normalizedProfile];
+        }));
       }
-      const candidate = connection as Partial<FTPConfig>;
-      if (!candidate.host || !candidate.username || !candidate.protocol) {
-        throw new Error('Each connection requires host, username, and protocol.');
-      }
-      if (!['sftp', 'ftp', 'ftps'].includes(candidate.protocol)) {
-        throw new Error(`Unsupported connection protocol: ${candidate.protocol}`);
-      }
-      if (candidate.collisionPolicy && !['ask', 'overwrite', 'skip'].includes(candidate.collisionPolicy)) {
-        throw new Error(`Unsupported collision policy: ${candidate.collisionPolicy}`);
-      }
-      if (candidate.syncMode && !['update', 'full'].includes(candidate.syncMode)) {
-        throw new Error(`Unsupported sync mode: ${candidate.syncMode}`);
-      }
-      if (candidate.localPath !== undefined) {
-        const localPath = String(candidate.localPath).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-        if (localPath.split('/').some(segment => segment === '..')) {
-          throw new Error('Local folder must stay inside the workspace.');
-        }
-        candidate.localPath = localPath || undefined;
-      }
-      if (candidate.default !== undefined && typeof candidate.default !== 'boolean') {
-        throw new Error('The default host marker must be true or false.');
-      }
-      if (candidate.keepalive !== undefined && (!Number.isInteger(candidate.keepalive) || candidate.keepalive < 0)) {
-        throw new Error('Keepalive must be a whole number of milliseconds, or 0 to disable it.');
-      }
-    }
+      return normalized;
+    });
 
-    if (connections.filter(connection => Boolean((connection as FTPConfig).default)).length > 1) {
+    if (connections.filter(connection => Boolean(connection.default)).length > 1) {
       throw new Error('Only one remote location can be the default host.');
     }
 
-    return connections as FTPConfig[];
+    return connections;
+  }
+
+  private resolveConnections(value: unknown): FTPConfig[] {
+    const remotes = parseReusableRemotes(
+      vscode.workspace.getConfiguration('stackerftp', this.scope).get<unknown>('remotes', {})
+    );
+    return this.parseConnections(value).map(connection => resolveConfiguredConnection(connection, remotes).config);
   }
 
   private async importConnections(): Promise<void> {
@@ -717,26 +1063,26 @@ export class SettingsPanel implements vscode.Disposable {
     const content = new TextDecoder('utf-8').decode(await vscode.workspace.fs.readFile(selected[0]));
     const connections = this.parseConnections(JSON.parse(content));
     this.panel?.webview.postMessage({ type: 'connectionsImported', connections });
-    statusBar.success(`Imported ${connections.length} remote location${connections.length === 1 ? '' : 's'}`);
+    const label = `Imported ${connections.length} remote location${connections.length === 1 ? '' : 's'}`;
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label });
+    logger.info(label);
   }
 
   private async testConnection(value: unknown): Promise<void> {
     try {
-      const config = this.parseConnections(value)[0];
+      const config = this.resolveConnections(value)[0];
       if (!config) {throw new Error('Select a host before testing the connection.');}
-      const connection = await connectionManager.connect(config);
-      await connection.list(config.remotePath || '/');
-      await connectionManager.disconnect(config);
+      await connectionManager.testConnection(config);
       this.panel?.webview.postMessage({ type: 'testSuccess', message: `Connection test succeeded for ${config.host}.` });
-      statusBar.success(`Connection test succeeded: ${config.host}`);
-    } catch (error: any) {
-      this.panel?.webview.postMessage({ type: 'testError', message: error?.message || String(error) });
-      statusBar.error(`Connection test failed: ${error?.message || error}`, true);
+      logger.info(`Connection test succeeded: ${config.host}`);
+    } catch (error) {
+      this.panel?.webview.postMessage({ type: 'testError', message: errorMessage(error) });
+      logger.warn(`Connection test failed: ${errorMessage(error)}`);
     }
   }
 
   private async loadRemoteDiff(value: unknown, force = false): Promise<void> {
-    const requestedConfig = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+    const requestedConfig = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!requestedConfig) {throw new Error('Select a host before loading remote files.');}
     const requestedCacheKey = this.cacheFile(requestedConfig)?.toString();
     if (!force && this.latestDiffRecords.size && requestedCacheKey && this.activeComparisonCacheKey === requestedCacheKey) {
@@ -746,9 +1092,7 @@ export class SettingsPanel implements vscode.Disposable {
       return;
     }
     if (requestedCacheKey && this.activeComparisonCacheKey !== requestedCacheKey) {
-      this.latestDiffRecords.clear();
-      this.diffDirectoryCache.clear();
-      this.activeComparisonCacheKey = requestedCacheKey;
+      this.activateComparisonIdentity(requestedCacheKey);
       await this.loadCachedComparison(requestedConfig);
       if (!force && this.latestDiffRecords.size) {
         this.sendComparisonSnapshot();
@@ -764,7 +1108,9 @@ export class SettingsPanel implements vscode.Disposable {
       requestedConfig.remotePath || '/'
     ].join('\n');
     const generation = ++this.diffScanGeneration;
-    this.pendingDiffRefresh = { value, generation, key: requestKey };
+    const forceDirectoryCacheRefresh = force
+      || Boolean(this.pendingDiffRefresh?.key === requestKey && this.pendingDiffRefresh.forceDirectoryCacheRefresh);
+    this.pendingDiffRefresh = { value, generation, key: requestKey, forceDirectoryCacheRefresh };
     this.hasPendingDiffRefresh = true;
     if (this.diffRefreshRunning) {
       logger.debug('ITFFTP diff refresh queued behind the active scan');
@@ -774,10 +1120,11 @@ export class SettingsPanel implements vscode.Disposable {
     try {
       do {
         const request = this.pendingDiffRefresh;
+        this.pendingDiffRefresh = undefined;
         this.hasPendingDiffRefresh = false;
         if (request) {
           this.activeDiffRequestKey = request.key;
-          await this.loadRemoteDiffOnce(request.value, request.generation);
+          await this.loadRemoteDiffOnce(request.value, request.generation, request.forceDirectoryCacheRefresh);
         }
       } while (this.hasPendingDiffRefresh);
     } finally {
@@ -786,79 +1133,170 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async loadRemoteDiffOnce(value: unknown, generation: number): Promise<void> {
-    const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+  private async loadRemoteDiffOnce(value: unknown, generation: number, forceDirectoryCacheRefresh: boolean): Promise<void> {
+    const config = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before loading remote files.');}
     // Expansion is presentation-only. Every comparison discovers descendants.
-    await this.scanComparison(config, '', generation, false, true);
+    await this.scanComparison(config, '', generation, false, true, false, forceDirectoryCacheRefresh);
   }
 
   private async loadRemoteDiffFolder(value: unknown, relativePath: unknown): Promise<void> {
-    const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+    const config = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before loading remote files.');}
-    const relativeDirectory = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const relativeDirectory = normalizeRemoteRelativePath(relativePath, true);
+    if (relativeDirectory === undefined) {throw new Error('Remote folder must stay inside the configured root.');}
     await this.scanComparison(config, relativeDirectory, ++this.diffScanGeneration, true, true);
+  }
+
+  private classifySettledTransfers(
+    paths: string[],
+    settled: PromiseSettledResult<TransferOutcome>[]
+  ): { completedPaths: string[]; skipped: Array<{ path: string; reason: string }>; failedCount: number } {
+    const completedPaths: string[] = [];
+    const skipped: Array<{ path: string; reason: string }> = [];
+    let failedCount = 0;
+    for (let index = 0; index < settled.length; index++) {
+      const result = settled[index];
+      if (result.status === 'rejected') {
+        failedCount++;
+      } else if (result.value.status === 'completed') {
+        completedPaths.push(paths[index]);
+      } else {
+        skipped.push({ path: paths[index], reason: result.value.reason });
+      }
+    }
+    return { completedPaths, skipped, failedCount };
+  }
+
+  private getTransferCandidates(
+    records: Iterable<DiffRecord>,
+    direction: 'upload' | 'download',
+    ignorePatterns: readonly string[] = []
+  ): DiffTransferCandidate[] {
+    const candidates: DiffTransferCandidate[] = [];
+    for (const record of records) {
+      if (this.isIgnoredDiffPath(record.path, ignorePatterns)) {continue;}
+      const source = direction === 'upload' ? record.local : record.remote;
+      const target = direction === 'upload' ? record.remote : record.local;
+      if (!source) {continue;}
+      const replacesFileWithDirectory = record.status === 'type-changed'
+        && source.type === 'directory'
+        && target?.type === 'file';
+      if (source.type !== 'file' && !replacesFileWithDirectory) {continue;}
+      candidates.push({ path: record.path, type: source.type, record });
+    }
+    return collapseRecursiveTransfers(candidates);
+  }
+
+  private directoryTransferOutcome(
+    result: SyncResult,
+    direction: 'upload' | 'download',
+    relativePath: string
+  ): TransferOutcome {
+    if (result.failed.length) {
+      const details = result.failed
+        .slice(0, 3)
+        .map(failure => `${failure.path}: ${failure.error}`)
+        .join('; ');
+      throw new Error(`${direction === 'upload' ? 'Upload' : 'Download'} failed for ${relativePath}: ${details}`);
+    }
+    if (result.skipped.length) {
+      const details = result.skipped.slice(0, 3).join(', ');
+      return {
+        status: 'skipped',
+        reason: `${result.skipped.length} nested entr${result.skipped.length === 1 ? 'y was' : 'ies were'} skipped${details ? ` (${details})` : ''}`
+      };
+    }
+    return { status: 'completed' };
+  }
+
+  private async transferDiffCandidate(
+    connection: BaseConnection,
+    candidate: DiffTransferCandidate,
+    direction: 'upload' | 'download',
+    config: FTPConfig
+  ): Promise<TransferOutcome> {
+    const record = candidate.record;
+    const source = direction === 'upload' ? record.local : record.remote;
+    const target = direction === 'upload' ? record.remote : record.local;
+    if (!source) {throw new Error(`The ${direction === 'upload' ? 'local' : 'remote'} source no longer exists: ${candidate.path}`);}
+    const localUri = vscode.Uri.joinPath(this.localRoot(config), ...candidate.path.split('/'));
+    const remoteRoot = (config.remotePath || '/').replace(/\/$/, '');
+    const remotePath = joinRemotePath(remoteRoot, candidate.path);
+
+    if (source.type === 'file') {
+      const options = {
+        size: source.size,
+        targetExists: Boolean(target),
+        sourceType: 'file' as const,
+        targetType: target?.type,
+        replaceTypeCollision: record.status === 'type-changed' && target?.type === 'directory'
+      };
+      return direction === 'upload'
+        ? transferManager.uploadFile(connection, localUri.fsPath, remotePath, config, options)
+        : transferManager.downloadFile(connection, remotePath, localUri.fsPath, config, options);
+    }
+
+    if (record.status !== 'type-changed' || target?.type !== 'file') {
+      throw new Error(`Directory transfer requires an explicit file/folder collision: ${candidate.path}`);
+    }
+    const options = {
+      sourceType: 'directory' as const,
+      targetType: 'file' as const,
+      replaceTypeCollision: true
+    };
+    const result = direction === 'upload'
+      ? await transferManager.uploadDirectory(connection, localUri.fsPath, remotePath, config, options)
+      : await transferManager.downloadDirectory(connection, remotePath, localUri.fsPath, config, options);
+    return this.directoryTransferOutcome(result, direction, candidate.path);
+  }
+
+  private reportSkippedTransfers(skipped: Array<{ path: string; reason: string }>): void {
+    if (!skipped.length) {return;}
+    const details = skipped.map(item => `${item.path}: ${item.reason}`).join('; ');
+    const label = `Skipped ${skipped.length} transfer${skipped.length === 1 ? '' : 's'} — ${details}`;
+    logger.warn(label);
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label });
   }
 
   private async syncChanged(direction: 'up' | 'down', value?: unknown): Promise<void> {
     if (!this.scope) {throw new Error('No workspace is selected.');}
-    const config = this.parseConnections(value)[0] || configManager.getActiveConfig(this.scope.fsPath) || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
+    const config = this.resolveConnections(value)[0] || configManager.getActiveConfig(this.scope.fsPath) || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
     if (!config) {throw new Error('Select a host before syncing.');}
     // The interactive tree is lazy. A bulk sync must discover every changed
     // descendant before it builds the transfer list.
-    await this.scanComparison(config, '', ++this.diffScanGeneration, false, true, true);
+    await this.scanComparison(config, '', ++this.diffScanGeneration, false, true, true, true);
     if (!this.latestDiffRecords.size) {throw new Error('No comparison data available. Open Transfer first.');}
 
     const rawCandidates = [...this.latestDiffRecords.values()].filter(record =>
       shouldSyncDiff(record, direction, this.localDirtyPaths.has(record.path))
     );
-    // The paired comparison already contains every changed descendant. Queue
-    // files directly so a changed directory cannot trigger a full recursive
-    // transfer of otherwise identical or ignored content.
-    const candidates = rawCandidates.filter(record => record.type === 'file'
-      && !this.isIgnoredDiffPath(record.path, config.ignore || []));
-    logger.info(`ITFFTP sync ${direction} selected ${candidates.length} changed file${candidates.length === 1 ? '' : 's'} from ${this.latestDiffRecords.size} compared paths`);
+    // Use the authoritative source-side type. Aggregate rows intentionally use
+    // "directory" when either side is a directory, which previously discarded
+    // file-over-directory collisions before they reached TransferManager.
+    const transferDirection = direction === 'up' ? 'upload' : 'download';
+    const candidates = this.getTransferCandidates(rawCandidates, transferDirection, config.ignore || []);
+    logger.info(`ITFFTP sync ${direction} selected ${candidates.length} changed entr${candidates.length === 1 ? 'y' : 'ies'} from ${this.latestDiffRecords.size} compared paths`);
 
     if (candidates.length === 0) {
-      statusBar.info(`No changed files to sync ${direction === 'up' ? 'up' : 'down'}.`);
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files to sync ${direction === 'up' ? 'up' : 'down'}` });
+      logger.info(`No changed entries to sync ${direction === 'up' ? 'up' : 'down'}.`);
+      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed entries to sync ${direction === 'up' ? 'up' : 'down'}` });
       return;
     }
 
     const connection = await connectionManager.connect(config);
     const transferConfig = this.withDashboardSyncMode(config);
-    const remoteRoot = (config.remotePath || '/').replace(/\/$/, '');
-    const actions: Array<{ path: string; promise: Promise<unknown> }> = [];
+    const actions: Array<{ path: string; promise: Promise<TransferOutcome> }> = [];
     for (const candidate of candidates) {
       const filePath = candidate.path.replace(/\/$/, '');
       if (!filePath) {continue;}
-      const segments = filePath.split('/');
-      const localUri = vscode.Uri.joinPath(this.localRoot(config), ...segments);
-      const remotePath = `${remoteRoot}/${filePath}`;
-      if (direction === 'up' && candidate.local) {
-        actions.push({
-          path: filePath,
-          promise: transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
-            size: candidate.local.size,
-            targetExists: Boolean(candidate.remote),
-            targetType: 'file'
-          })
-        });
-      } else if (direction === 'down' && candidate.remote) {
-        actions.push({
-          path: filePath,
-          promise: transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
-            size: candidate.remote.size,
-            targetExists: Boolean(candidate.local),
-            targetType: 'file'
-          })
-        });
-      } else {
-        continue;
-      }
+      actions.push({
+        path: filePath,
+        promise: this.transferDiffCandidate(connection, candidate, transferDirection, transferConfig)
+      });
     }
 
-    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `${direction === 'up' ? 'Uploading' : 'Downloading'} ${candidates.length} changed files`, percentage: 0 });
+    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `${direction === 'up' ? 'Uploading' : 'Downloading'} ${candidates.length} changed entries`, percentage: 0 });
     if (actions.length === 0) {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No valid entries for ${direction === 'up' ? 'upload' : 'download'}` });
       return;
@@ -866,17 +1304,27 @@ export class SettingsPanel implements vscode.Disposable {
 
     try {
       const settled = await Promise.allSettled(actions.map(entry => entry.promise));
-      const completedPaths = actions.filter((_, index) => settled[index].status === 'fulfilled').map(entry => entry.path);
+      const { completedPaths, skipped, failedCount } = this.classifySettledTransfers(
+        actions.map(entry => entry.path),
+        settled
+      );
       if (completedPaths.length > 0) {
-        this.diffDirectoryCache.clear();
         await this.refreshAfterTransfer(completedPaths, direction === 'up' ? 'upload' : 'download', config);
       }
-      if (completedPaths.length < actions.length) {
-        const failedCount = actions.length - completedPaths.length;
-        statusBar.warn(`Sync completed with ${failedCount} failure${failedCount === 1 ? '' : 's'}`);
+      if (failedCount > 0) {
+        const message = direction === 'up' ? 'Uploaded' : 'Downloaded';
+        const skippedDetails = skipped.length
+          ? `; skipped ${skipped.map(item => `${item.path}: ${item.reason}`).join('; ')}`
+          : '';
+        const label = `${message} ${completedPaths.length} changed entr${completedPaths.length === 1 ? 'y' : 'ies'}; ${failedCount} failed${skippedDetails}`;
+        logger.warn(label);
+        this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label });
+      } else if (skipped.length) {
+        this.reportSkippedTransfers(skipped);
+      } else {
+        const message = direction === 'up' ? 'Uploaded' : 'Downloaded';
+        this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `${message} ${completedPaths.length} changed entr${completedPaths.length === 1 ? 'y' : 'ies'}` });
       }
-      const message = direction === 'up' ? 'Uploaded' : 'Downloaded';
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `${message} ${completedPaths.length} changed file${completedPaths.length === 1 ? '' : 's'}` });
     } finally {
       // No-op. Sync completion status is posted above to keep the UI deterministic.
     }
@@ -887,45 +1335,48 @@ export class SettingsPanel implements vscode.Disposable {
     const config = selectedConfig || configManager.getActiveConfig(this.scope.fsPath) || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
     if (!config) {return;}
 
-    for (const syncedPath of syncedPaths) {
-      const pathToSync = syncedPath.replace(/\/$/, '');
-      const prefix = `${pathToSync}`;
-      for (const dirtyPath of [...this.localDirtyPaths]) {
-        if (dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`)) {
-          this.localDirtyPaths.delete(dirtyPath);
-        }
+    const completedPaths = [...new Set(syncedPaths.map(syncedPath => syncedPath.replace(/\/$/, '')).filter(Boolean))];
+    // A verified transfer invalidates older scans immediately. The comparison
+    // itself is committed only from authoritative local and remote listings.
+    const generation = ++this.diffScanGeneration;
+    this.comparisonRevision++;
+    const pathsByParent = new Map<string, Set<string>>();
+    for (const completedPath of completedPaths) {
+      const directParent = completedPath.includes('/') ? completedPath.slice(0, completedPath.lastIndexOf('/')) : '';
+      for (let parent: string | undefined = directParent; parent !== undefined; parent = parent
+        ? (parent.includes('/') ? parent.slice(0, parent.lastIndexOf('/')) : '')
+        : undefined) {
+        const paths = pathsByParent.get(parent) || new Set<string>();
+        paths.add(completedPath);
+        pathsByParent.set(parent, paths);
       }
     }
-    for (const syncedPath of syncedPaths) {
-      const normalized = syncedPath.replace(/\/$/, '');
-      const record = this.latestDiffRecords.get(normalized);
-      if (record) {
-        if (direction === 'upload' && record.local) {record.remote = { ...record.local };}
-        if (direction === 'download' && record.remote) {record.local = { ...record.remote };}
-        record.status = this.diffStatus(record);
-        record.newer = record.status === 'modified' ? newerSide(record, this.localDirtyPaths.has(record.path)) : undefined;
-        this.latestDiffRecords.set(normalized, record);
-      }
-      const parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
-      const remoteRoot = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-      const remoteDirectory = parent ? `${remoteRoot}/${parent}` : remoteRoot;
-      const cachePrefix = `${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`;
-      for (const key of [...this.diffDirectoryCache.keys()]) {
-        if (key === cachePrefix) {this.diffDirectoryCache.delete(key);}
-      }
+    const parents = [...pathsByParent.keys()].sort((left, right) => {
+      const depth = left.split('/').filter(Boolean).length - right.split('/').filter(Boolean).length;
+      return depth || left.localeCompare(right);
+    });
+    logger.info(`ITFFTP ${direction} completed; re-comparing ${parents.length} affected parent${parents.length === 1 ? '' : 's'}`);
+    for (const parent of parents) {
+      await this.scanComparison(
+        config,
+        parent,
+        generation,
+        true,
+        false,
+        false,
+        { relativeDirectory: parent, recursive: false },
+        pathsByParent.get(parent)
+      );
     }
-    this.sendComparisonSnapshot();
-    this.scheduleComparisonCacheWrite(config);
   }
 
   private async refreshChangedPathAfterMutation(filePath: string, side: 'local' | 'remote', action: string, config: FTPConfig): Promise<void> {
     const normalized = filePath.replace(/\/$/, '');
     const parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
-    const remoteRoot = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    const remoteDirectory = parent ? `${remoteRoot}/${parent}` : remoteRoot;
-    this.diffDirectoryCache.delete(`${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`);
+    const generation = ++this.diffScanGeneration;
 
     if (action === 'delete') {
+      this.invalidateDiffDirectoryCache(config, parent);
       for (const [path, record] of [...this.latestDiffRecords.entries()]) {
         if (path !== normalized && !path.startsWith(`${normalized}/`)) {continue;}
         if (side === 'local') {record.local = undefined;}
@@ -938,81 +1389,22 @@ export class SettingsPanel implements vscode.Disposable {
         record.newer = undefined;
         this.latestDiffRecords.set(path, record);
       }
+      this.comparisonRevision++;
       this.sendComparisonSnapshot();
-      this.scheduleComparisonCacheWrite(config);
+      this.scheduleComparisonCacheWrite(config, generation, this.comparisonRevision, this.latestDiffRecords.values());
       return;
     }
 
     // Rename changes the path identity, so validate only its parent directory.
-    await this.scanComparison(config, parent, ++this.diffScanGeneration, true, false);
-  }
-
-  private async loadRemoteDiffDirectory(config: FTPConfig, relativeDirectory: string, background = false): Promise<Array<{ path: string; type: 'file' | 'directory'; status: string; size?: number; modifyTime?: number }>> {
-    try {
-      const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$|(?<!^)\/+/g, '/').replace(/\/$/, '') || '/';
-      const remoteDirectory = relativeDirectory ? `${root}/${relativeDirectory}` : root;
-      const cacheKey = `${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`;
-      const ignoredPatterns = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
-      if (!background) {this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Loading ${relativeDirectory || 'remote root'}…` });}
-
-      let files = this.diffDirectoryCache.get(cacheKey);
-      const fromCache = Boolean(files);
-      if (!files) {
-        const connection = await connectionManager.connect(config);
-        const listed = await connection.list(remoteDirectory);
-        files = listed.flatMap(item => {
-          const name = String(item.name || '').replace(/\\/g, '/');
-          const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-          if (!name || this.isIgnoredDiffPath(relativePath, ignoredPatterns)) {return [];}
-          const directory = item.type === 'directory';
-          return [{ path: `${relativePath}${directory ? '/' : ''}`, type: directory ? 'directory' as const : 'file' as const, status: directory ? '' : 'remote', size: Number(item.size || 0), modifyTime: item.modifyTime instanceof Date ? item.modifyTime.getTime() : Number(item.modifyTime || 0) }];
-        });
-        this.diffDirectoryCache.set(cacheKey, files);
-      }
-
-      const local = await this.getWorkspaceDirectory(relativeDirectory, ignoredPatterns, config);
-      this.panel?.webview.postMessage({ type: 'remoteDiff', root, files, localFiles: local.files, localFileStats: local.stats, parent: relativeDirectory, complete: true, fullScan: false, scanComplete: !background });
-      if (!background) {this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `Loaded ${relativeDirectory || 'remote root'} (${files.length} entries)` });}
-      logger.info(`ITFFTP diff directory loaded: ${relativeDirectory || '/'} (${files.length} remote entries, ${fromCache ? 'cached' : 'fresh'})`);
-      return files.map(file => ({ ...file, status: '' }));
-    } catch (error: any) {
-      logger.error('ITFFTP diff directory load failed', error);
-      this.panel?.webview.postMessage({ type: 'remoteDiffError', message: error?.message || String(error) });
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Unable to load remote directory' });
-      return [];
-    }
-  }
-
-  private async scanFullDiff(config: FTPConfig): Promise<void> {
-    const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$|(?<!^)\/+/g, '/').replace(/\/$/, '') || '/';
-    const scanKey = `${config.protocol}:${config.host}:${config.port || ''}:${root}`;
-    if (this.diffFullScans.has(scanKey)) {return;}
-    this.diffFullScans.add(scanKey);
-    const queue = [''];
-    const visited = new Set<string>();
-    let entries = 0;
-    try {
-      while (queue.length > 0 && entries < 10000) {
-        const directory = queue.shift()!;
-        if (visited.has(directory)) {continue;}
-        visited.add(directory);
-        this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Comparing ${visited.size} folder${visited.size === 1 ? '' : 's'}…` });
-        const listed = await this.loadRemoteDiffDirectory(config, directory, true);
-        entries += listed.length;
-        for (const entry of listed) {
-          if (entry.type === 'directory') {queue.push(entry.path.replace(/\/$/, ''));}
-        }
-      }
-      this.panel?.webview.postMessage({ type: 'remoteDiffScanComplete', folders: visited.size, entries });
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `Comparison updated (${entries} entries)` });
-      logger.info(`ITFFTP full diff comparison complete: ${visited.size} folders, ${entries} entries`);
-    } catch (error) {
-      logger.error('ITFFTP full diff comparison failed', error);
-      this.panel?.webview.postMessage({ type: 'remoteDiffError', message: error instanceof Error ? error.message : String(error) });
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Unable to complete file comparison' });
-    } finally {
-      this.diffFullScans.delete(scanKey);
-    }
+    await this.scanComparison(
+      config,
+      parent,
+      generation,
+      true,
+      false,
+      false,
+      { relativeDirectory: parent, recursive: false }
+    );
   }
 
   /**
@@ -1020,23 +1412,152 @@ export class SettingsPanel implements vscode.Disposable {
    * single record for each relative path.  This deliberately never sends a
    * free-standing local list and remote list for the webview to reconcile.
    */
+  private async withExclusiveDiffScanConnection<T>(connection: BaseConnection, operation: () => Promise<T>): Promise<T> {
+    const previous = this.diffScanConnectionTails.get(connection) || Promise.resolve();
+    let release!: () => void;
+    const reservation = new Promise<void>(resolve => {release = resolve;});
+    const tail = previous.then(() => reservation);
+    this.diffScanConnectionTails.set(connection, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.diffScanConnectionTails.get(connection) === tail) {
+        this.diffScanConnectionTails.delete(connection);
+      }
+    }
+  }
+
+  private async withDiffScanConnection<T>(
+    config: FTPConfig,
+    session: { primary: BaseConnection },
+    usePrimary: boolean,
+    isCancelled: () => boolean,
+    operation: (connection: BaseConnection) => Promise<T>
+  ): Promise<T> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (isCancelled()) {throw new Error('Comparison refresh was superseded.');}
+      let connection: BaseConnection | undefined;
+      let pooled = false;
+      try {
+        if (usePrimary) {
+          const currentPrimary = connectionManager.getConnection(config);
+          if (currentPrimary?.connected) {session.primary = currentPrimary;}
+          connection = session.primary;
+        } else {
+          connection = await connectionManager.getStrictPooledConnection(config);
+        }
+        pooled = connectionManager.getConnection(config) !== connection;
+        if (isCancelled()) {throw new Error('Comparison refresh was superseded.');}
+        return await this.withExclusiveDiffScanConnection(connection, () => operation(connection!));
+      } catch (error) {
+        if (!isConnectionClosedError(error) || attempt > 0 || isCancelled()) {throw error;}
+        if (connection && connectionManager.getConnection(config) === connection) {
+          session.primary = await connectionManager.invalidateAndReconnect(config, connection);
+          logger.info('ITFFTP scan primary connection closed; continuing on the reconnected session');
+        } else if (connection) {
+          // A classified closed pooled transport must never re-enter the idle
+          // pool, even when its wrapper still reports connected.
+          pooled = false;
+          await connectionManager.discardPooledConnection(config, connection);
+          logger.info('ITFFTP pooled scan connection closed; retrying on a fresh pooled session');
+        } else {
+          logger.info('ITFFTP scan pool acquisition failed on a closed transport; retrying');
+        }
+      } finally {
+        if (connection && pooled) {
+          connectionManager.releasePooledConnection(config, connection);
+        }
+      }
+    }
+    throw new Error('Unable to acquire a live comparison connection.');
+  }
+
   private async scanComparison(
     config: FTPConfig,
     startDirectory = '',
-    generation = ++this.diffScanGeneration,
+    generation: number | undefined = undefined,
     partial = false,
     recursive = true,
-    verifyDirtyContent = false
+    verifyDirtyContent = false,
+    forceDirectoryCacheRefresh: boolean | { relativeDirectory: string; recursive: boolean } = false,
+    synchronizedPaths?: ReadonlySet<string>
   ): Promise<void> {
+    const previous = this.diffScanTail;
+    let release!: () => void;
+    const reservation = new Promise<void>(resolve => {release = resolve;});
+    const tail = previous.then(() => reservation);
+    this.diffScanTail = tail;
+    await previous;
+    try {
+      const executionGeneration = generation ?? ++this.diffScanGeneration;
+      if (forceDirectoryCacheRefresh === true) {
+        this.diffDirectoryCache.clear();
+      } else if (forceDirectoryCacheRefresh) {
+        this.invalidateDiffDirectoryCache(
+          config,
+          forceDirectoryCacheRefresh.relativeDirectory,
+          forceDirectoryCacheRefresh.recursive
+        );
+      }
+      const expectedRevision = this.comparisonRevision;
+      const synchronizationKey = this.cacheFile(config)?.toString();
+      const pendingSynchronized = synchronizationKey
+        ? this.pendingSynchronizedPaths.get(synchronizationKey)
+        : undefined;
+      const effectiveSynchronizedPaths = new Set<string>([
+        ...(pendingSynchronized || []),
+        ...(synchronizedPaths || [])
+      ]);
+      await this.runScanComparison(
+        config,
+        startDirectory,
+        executionGeneration,
+        partial,
+        recursive,
+        verifyDirtyContent,
+        expectedRevision,
+        effectiveSynchronizedPaths.size ? effectiveSynchronizedPaths : undefined
+      );
+    } finally {
+      release();
+      if (this.diffScanTail === tail) {this.diffScanTail = Promise.resolve();}
+    }
+  }
+
+  private async runScanComparison(
+    config: FTPConfig,
+    startDirectory = '',
+    generation: number,
+    partial = false,
+    recursive = true,
+    verifyDirtyContent = false,
+    expectedRevision = this.comparisonRevision,
+    synchronizedPaths?: ReadonlySet<string>
+  ): Promise<void> {
+    const normalizedStart = normalizeRemoteRelativePath(startDirectory, true);
+    if (normalizedStart === undefined) {throw new Error('Remote folder must stay inside the configured root.');}
+    startDirectory = normalizedStart;
+    if (generation !== this.diffScanGeneration || expectedRevision !== this.comparisonRevision) {return;}
+
+    const scanStartedAt = Date.now();
     const cacheFile = this.cacheFile(config);
     if (cacheFile) {this.activeComparisonCacheKey = cacheFile.toString();}
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
     const ignored = [...DEFAULT_IGNORE_PATTERNS, ...(config.ignore || [])];
-    // Comparisons are control-channel metadata operations. Reuse the already
-    // authenticated primary session instead of paying for another FTP login.
-    let connection = await connectionManager.connect(config);
-    const queue = [startDirectory];
-    const visited = new Set<string>();
+    const configuredConcurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
+    const requestedScanConcurrency = Number.isFinite(configuredConcurrency) ? Math.round(configuredConcurrency) : 1;
+    const scanConcurrency = config.protocol === 'sftp'
+      ? 1
+      : Math.min(MAX_FTP_SCAN_CONCURRENCY, Math.max(1, requestedScanConcurrency));
+    const isCancelled = (): boolean => generation !== this.diffScanGeneration || expectedRevision !== this.comparisonRevision;
+    const verifiedCleanPaths = new Set<string>();
+    const skipRemoteDirectoryListing = new Set<string>();
+    const knownStart = startDirectory ? this.latestDiffRecords.get(startDirectory) : undefined;
+    if (startDirectory && knownStart?.local?.type === 'directory' && knownStart.remote?.type !== 'directory') {
+      skipRemoteDirectoryListing.add(startDirectory);
+    }
     const isAffectedPath = (path: string): boolean => {
       if (!startDirectory) {return recursive || !path.includes('/');}
       if (path === startDirectory) {return true;}
@@ -1046,139 +1567,308 @@ export class SettingsPanel implements vscode.Disposable {
     const previousAffectedPaths = partial
       ? [...this.latestDiffRecords.keys()].filter(isAffectedPath)
       : [...this.latestDiffRecords.keys()];
-    const records = partial ? new Map(this.latestDiffRecords) : new Map<string, DiffRecord>();
+    const records: Map<string, DiffRecord> = partial
+      ? new Map(this.latestDiffRecords)
+      : new Map();
     if (partial) {
       for (const path of previousAffectedPaths) {
         if (path !== startDirectory) {records.delete(path);}
       }
     }
+
     let reportedPercentage = 0;
-    if (!partial) {
-      this.latestDiffRecords.clear();
-      this.panel?.webview.postMessage({ type: 'diffStart', root, startDirectory });
-    }
-    this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: 'Comparing local and remote files…', percentage: 0 });
-    logger.info(`ITFFTP paired diff scan started: ${root}${startDirectory ? `/${startDirectory}` : ''}`);
+    let lastUiBatchAt = 0;
+    const pendingUiRecords = new Map<string, DiffRecord>();
+    const publishPendingUiRecords = (
+      progress: { visitedDirectories: number; pendingDirectories: number },
+      force = false
+    ): void => {
+      if (partial || pendingUiRecords.size === 0 || isCancelled()) {return;}
+      const now = Date.now();
+      if (!force && lastUiBatchAt > 0 && now - lastUiBatchAt < 150 && pendingUiRecords.size < 250) {return;}
+      const batch = [...pendingUiRecords.values()];
+      pendingUiRecords.clear();
+      lastUiBatchAt = now;
+      this.panel?.webview.postMessage({
+        type: 'diffBatch',
+        records: batch,
+        scannedDirectories: progress.visitedDirectories,
+        pendingDirectories: progress.pendingDirectories,
+        complete: force && progress.pendingDirectories === 0
+      });
+    };
+
+    this.beginDiffScanProgress(generation);
+    logger.info(`ITFFTP paired diff scan started: ${root}${startDirectory ? `/${startDirectory}` : ''}; concurrency=${scanConcurrency}`);
     try {
-      while (queue.length && visited.size < 10000) {
-        if (generation !== this.diffScanGeneration) {
-          logger.info('ITFFTP paired diff scan superseded by a newer refresh');
-          return;
-        }
-        const directory = queue.shift()!;
-        if (visited.has(directory)) {continue;}
-        visited.add(directory);
-        const directoryStartedAt = Date.now();
-        const displayDirectory = directory || '/';
-        this.panel?.webview.postMessage({
-          type: 'diffTransferProgress',
-          active: true,
-          label: `Listing ${displayDirectory} · ${visited.size} scanned · ${queue.length} queued`,
-          percentage: reportedPercentage
-        });
-        logger.info(`ITFFTP diff folder scan started: ${displayDirectory} (${visited.size} scanned, ${queue.length} queued)`);
-        const localEntriesPromise = this.getWorkspaceDirectoryEntries(directory, ignored, config);
-        let remoteEntries: DiffEntry[];
-        try {
-          remoteEntries = await this.getRemoteDirectoryEntries(connection, config, directory, ignored, directory !== startDirectory);
-        } catch (error) {
-          if (!isConnectionClosedError(error) || config.protocol === 'sftp') { throw error; }
-          connection = await connectionManager.connect(config);
-          logger.info('ITFFTP scan connection was closed by the server; continuing on the reconnected primary session');
-          remoteEntries = await this.getRemoteDirectoryEntries(connection, config, directory, ignored, directory !== startDirectory);
-        }
-        const localEntries = await localEntriesPromise;
-        logger.info(`ITFFTP diff folder scan complete: ${displayDirectory}; ${localEntries.length} local, ${remoteEntries.length} remote; ${Date.now() - directoryStartedAt}ms`);
-        const localByPath = new Map(localEntries.map(entry => [entry.path, entry]));
-        const remoteByPath = new Map(remoteEntries.map(entry => [entry.path, entry]));
-        for (const path of new Set([...localByPath.keys(), ...remoteByPath.keys()])) {
-          const local = localByPath.get(path);
-          const remote = remoteByPath.get(path);
-          const type = local?.type === 'directory' || remote?.type === 'directory' ? 'directory' : 'file';
-          records.set(path, {
-            path, type,
-            local: local && { type: local.type, size: local.size, modifyTime: local.modifyTime },
-            remote: remote && { type: remote.type, size: remote.size, modifyTime: remote.modifyTime },
-            status: 'same'
-          });
-          if (recursive && (local?.type === 'directory' || remote?.type === 'directory')) {queue.push(path);}
-        }
-        if (verifyDirtyContent) {
-          await this.clearFalseDirtyFlags(connection, config, [...new Set([...localByPath.keys(), ...remoteByPath.keys()])], records);
-        }
-        // A watcher may have refreshed local metadata while this slower remote
-        // directory scan was in flight. Preserve that newer local snapshot so
-        // an old scan batch cannot make an edited file disappear again.
-        for (const dirtyPath of this.localDirtyPaths) {
-          const live = this.latestDiffRecords.get(dirtyPath);
-          const scanned = records.get(dirtyPath);
-          if (!live || !scanned) {continue;}
-          scanned.local = live.local;
-        }
-        for (const record of records.values()) {
-          record.status = this.diffStatus(record);
-          record.newer = record.status === 'modified' ? newerSide(record, this.localDirtyPaths.has(record.path)) : undefined;
-          if (record.status === 'same') {this.localDirtyPaths.delete(record.path);}
-        }
-        this.latestDiffRecords.clear();
-        for (const [path, record] of records) {this.latestDiffRecords.set(path, record);}
-        if (!partial) {
-          this.panel?.webview.postMessage({ type: 'diffBatch', records: [...records.values()], scannedDirectories: visited.size, pendingDirectories: queue.length, complete: queue.length === 0 });
-        }
-        const denominator = Math.max(1, visited.size + queue.length);
-        reportedPercentage = Math.max(reportedPercentage, Math.min(95, Math.round((visited.size / denominator) * 95)));
-        this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Compared ${displayDirectory} · ${visited.size} scanned · ${queue.length} queued`, percentage: reportedPercentage });
+      const session = { primary: await connectionManager.connect(config) };
+      if (isCancelled()) {
+        this.finishDiffScanProgress(generation, 'Comparison refresh superseded');
+        this.sendComparisonSnapshot();
+        return;
       }
-      if (generation !== this.diffScanGeneration) {return;}
+      if (!partial) {
+        this.panel?.webview.postMessage({ type: 'diffStart', root, startDirectory });
+      }
+
+      const traversal = await runBoundedRecursiveScan<{
+        records: DiffRecord[];
+        localCount: number;
+        remoteCount: number;
+        elapsedMs: number;
+      }>({
+        startDirectory,
+        concurrency: scanConcurrency,
+        isCancelled,
+        scanDirectory: async (directory, workerIndex) => {
+          const directoryStartedAt = Date.now();
+          const localEntriesPromise = this.getWorkspaceDirectoryEntries(directory, ignored, config);
+          return this.withDiffScanConnection(
+            config,
+            session,
+            config.protocol === 'sftp' || workerIndex === 0,
+            isCancelled,
+            async connection => {
+              const remoteEntries = skipRemoteDirectoryListing.has(directory)
+                ? []
+                : await this.getRemoteDirectoryEntries(
+                  connection,
+                  config,
+                  directory,
+                  ignored,
+                  directory !== startDirectory
+                );
+              const localEntries = await localEntriesPromise;
+              if (isCancelled()) {throw new Error('Comparison refresh was superseded.');}
+              const localByPath = new Map(localEntries.map(entry => [entry.path, entry]));
+              const remoteByPath = new Map(remoteEntries.map(entry => [entry.path, entry]));
+              const directoryRecords = new Map<string, DiffRecord>();
+              const childDirectories: string[] = [];
+              for (const path of new Set([...localByPath.keys(), ...remoteByPath.keys()])) {
+                const local = localByPath.get(path);
+                const remote = remoteByPath.get(path);
+                const type = local?.type === 'directory' || remote?.type === 'directory' ? 'directory' : 'file';
+                directoryRecords.set(path, {
+                  path,
+                  type,
+                  local: local && { type: local.type, size: local.size, modifyTime: local.modifyTime },
+                  remote: remote && { type: remote.type, size: remote.size, modifyTime: remote.modifyTime },
+                  status: 'same'
+                });
+                if (recursive && type === 'directory') {
+                  childDirectories.push(path);
+                  if (remote?.type !== 'directory') {skipRemoteDirectoryListing.add(path);}
+                }
+              }
+              if (verifyDirtyContent) {
+                await this.clearFalseDirtyFlags(connection, config, [...directoryRecords.keys()], directoryRecords, verifiedCleanPaths);
+              }
+              return {
+                childDirectories,
+                value: {
+                  records: [...directoryRecords.values()],
+                  localCount: localEntries.length,
+                  remoteCount: remoteEntries.length,
+                  elapsedMs: Date.now() - directoryStartedAt
+                }
+              };
+            }
+          );
+        },
+        onBatch: (entries, progress) => {
+          if (isCancelled()) {return;}
+          for (const entry of entries) {
+            logger.info(`ITFFTP diff folder scan complete: ${entry.directory || '/'}; ${entry.value.localCount} local, ${entry.value.remoteCount} remote; ${entry.value.elapsedMs}ms`);
+            for (const record of entry.value.records) {
+              const live = this.latestDiffRecords.get(record.path);
+              if (this.localDirtyPaths.has(record.path) && !synchronizedPaths?.has(record.path)) {
+                if (live) {record.local = live.local;}
+              }
+              if (synchronizedPaths?.has(record.path)) {
+                record.synchronized = this.createSynchronizedSignatures(record);
+              } else if (live?.synchronized
+                && this.signaturesMatch(record.local, live.synchronized.local)
+                && this.signaturesMatch(record.remote, live.synchronized.remote)) {
+                record.synchronized = {
+                  local: { ...live.synchronized.local },
+                  remote: { ...live.synchronized.remote }
+                };
+              }
+              const synchronized = this.hasMatchingSynchronizedSignatures(record);
+              if (synchronized) {verifiedCleanPaths.add(record.path);}
+              const locallyDirty = this.localDirtyPaths.has(record.path)
+                && !verifiedCleanPaths.has(record.path)
+                && !synchronized;
+              record.status = synchronized ? 'same' : classifyDiff(record, locallyDirty);
+              record.newer = record.status === 'modified'
+                ? newerSide(record, locallyDirty)
+                : undefined;
+              records.set(record.path, record);
+              if (!partial) {
+                pendingUiRecords.set(record.path, record);
+              }
+            }
+          }
+          publishPendingUiRecords(progress);
+
+          const denominator = Math.max(1, progress.visitedDirectories + progress.pendingDirectories);
+          reportedPercentage = Math.max(
+            reportedPercentage,
+            Math.min(95, Math.round((progress.visitedDirectories / denominator) * 95))
+          );
+          if (this.activeDiffProgressGeneration === generation) {
+            const label = entries.length === 1
+              ? `Compared ${entries[0].directory || '/'}`
+              : `Compared ${entries.length} folders`;
+            this.panel?.webview.postMessage({
+              type: 'diffTransferProgress',
+              active: true,
+              label: `${label} · ${progress.visitedDirectories} scanned · ${progress.pendingDirectories} queued`,
+              percentage: reportedPercentage
+            });
+          }
+        }
+      });
+
+      if (traversal.cancelled || isCancelled()) {
+        logger.info('ITFFTP paired diff scan superseded by a newer refresh');
+        this.finishDiffScanProgress(generation, 'Comparison refresh superseded');
+        this.sendComparisonSnapshot();
+        return;
+      }
+
+      for (const dirtyPath of this.localDirtyPaths) {
+        if (verifiedCleanPaths.has(dirtyPath) || synchronizedPaths?.has(dirtyPath)) {continue;}
+        const live = this.latestDiffRecords.get(dirtyPath);
+        const scanned = records.get(dirtyPath);
+        if (live && scanned) {
+          scanned.local = live.local;
+          if (!partial) {pendingUiRecords.set(dirtyPath, scanned);}
+        }
+      }
+      const cleanPaths = new Set(verifiedCleanPaths);
+      for (const record of records.values()) {
+        const synchronized = this.hasMatchingSynchronizedSignatures(record);
+        const locallyDirty = this.localDirtyPaths.has(record.path)
+          && !verifiedCleanPaths.has(record.path)
+          && !synchronized;
+        record.status = synchronized ? 'same' : classifyDiff(record, locallyDirty);
+        record.newer = record.status === 'modified'
+          ? newerSide(record, locallyDirty)
+          : undefined;
+        if (record.status === 'same') {cleanPaths.add(record.path);}
+      }
+      if (isCancelled()) {
+        this.finishDiffScanProgress(generation, 'Comparison refresh superseded');
+        this.sendComparisonSnapshot();
+        return;
+      }
+      this.latestDiffRecords.clear();
+      for (const [path, record] of records) {this.latestDiffRecords.set(path, record);}
+      for (const cleanPath of cleanPaths) {this.localDirtyPaths.delete(cleanPath);}
+
       if (partial) {
         const affected = [...records.values()].filter(record => isAffectedPath(record.path));
         const currentPaths = new Set(affected.map(record => record.path));
         const removed = previousAffectedPaths.filter(path => !currentPaths.has(path));
         this.panel?.webview.postMessage({ type: 'diffPatch', root: startDirectory, records: affected, removed });
       } else {
-        this.panel?.webview.postMessage({ type: 'diffScanComplete', records: [...records.values()], folders: visited.size });
+        publishPendingUiRecords(
+          { visitedDirectories: traversal.visitedDirectories, pendingDirectories: 0 },
+          true
+        );
+        this.panel?.webview.postMessage({
+          type: 'diffScanComplete',
+          folders: traversal.visitedDirectories,
+          paths: records.size
+        });
       }
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `Comparison updated (${records.size} paths)`, percentage: 100 });
-      this.scheduleComparisonCacheWrite(config);
+
+      const committedRevision = ++this.comparisonRevision;
+      if (synchronizedPaths?.size && cacheFile) {
+        const pendingSynchronized = this.pendingSynchronizedPaths.get(cacheFile.toString());
+        if (pendingSynchronized) {
+          for (const synchronizedPath of synchronizedPaths) {
+            const synchronizedRecord = records.get(synchronizedPath);
+            if (synchronizedRecord && this.hasMatchingSynchronizedSignatures(synchronizedRecord)) {
+              pendingSynchronized.delete(synchronizedPath);
+            }
+          }
+          if (pendingSynchronized.size === 0) {this.pendingSynchronizedPaths.delete(cacheFile.toString());}
+        }
+      }
+      this.finishDiffScanProgress(generation, `Comparison updated (${records.size} paths)`, 100);
+      this.scheduleComparisonCacheWrite(config, generation, committedRevision, records.values());
       const statusCounts = [...records.values()].reduce<Record<string, number>>((counts, record) => {
         counts[record.status] = (counts[record.status] || 0) + 1;
         return counts;
       }, {});
-      logger.info(`ITFFTP paired diff scan complete: ${visited.size} folders, ${records.size} paths; ${JSON.stringify(statusCounts)}`);
-    } catch (error: any) {
-      if (generation !== this.diffScanGeneration) {return;}
+      logger.info(`ITFFTP paired diff scan complete: ${traversal.visitedDirectories} folders, ${records.size} paths, ${Date.now() - scanStartedAt}ms; ${JSON.stringify(statusCounts)}`);
+    } catch (error) {
+      if (isCancelled()) {
+        this.finishDiffScanProgress(generation, 'Comparison refresh superseded');
+        this.sendComparisonSnapshot();
+        return;
+      }
       logger.error('ITFFTP paired diff scan failed', error);
-      this.panel?.webview.postMessage({ type: 'remoteDiffError', message: error?.message || String(error) });
-      this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: 'Unable to refresh file comparison' });
-    } finally {
-      // The primary session belongs to ConnectionManager and remains available.
+      this.sendComparisonSnapshot();
+      this.panel?.webview.postMessage({ type: 'remoteDiffError', message: errorMessage(error) });
+      this.finishDiffScanProgress(generation, 'Unable to refresh file comparison');
     }
   }
 
-  private async getRemoteDirectoryEntries(connection: any, config: FTPConfig, relativeDirectory: string, ignorePatterns: string[], allowMissing: boolean): Promise<DiffEntry[]> {
+  private async getRemoteDirectoryEntries(connection: BaseConnection, config: FTPConfig, relativeDirectory: string, ignorePatterns: string[], allowMissing: boolean): Promise<DiffEntry[]> {
+    const normalizedDirectory = normalizeRemoteRelativePath(relativeDirectory, true);
+    if (normalizedDirectory === undefined) {throw new Error('Remote folder must stay inside the configured root.');}
+    relativeDirectory = normalizedDirectory;
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    const remoteDirectory = relativeDirectory ? `${root}/${relativeDirectory}` : root;
-    const cacheKey = `${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`;
+    const remoteDirectory = relativeDirectory ? joinRemotePath(root, relativeDirectory) : root;
+    const cacheKey = this.diffDirectoryCacheKey(config, remoteDirectory);
     const cached = this.diffDirectoryCache.get(cacheKey);
     if (cached) {return cached;}
     try {
       const listed = await connection.list(remoteDirectory);
-      const entries = listed.flatMap((item: any): DiffEntry[] => {
-        const name = String(item.name || '').replace(/\\/g, '/');
+      const entries = listed.flatMap((item): DiffEntry[] => {
+        const name = safeRemoteEntryName(item.name);
+        if (!name) {return [];}
         const path = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-        if (!name || this.isIgnoredDiffPath(path, ignorePatterns)) {return [];}
+        if (this.isIgnoredDiffPath(path, ignorePatterns)) {return [];}
         return [{ path, type: item.type === 'directory' ? 'directory' : 'file', size: Number(item.size || 0), modifyTime: item.modifyTime instanceof Date ? item.modifyTime.getTime() : Number(item.modifyTime || 0) }];
       });
       this.diffDirectoryCache.set(cacheKey, entries);
       return entries;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (allowMissing && /^550\b|\b550\b.*(?:not found|no such|existence)|no such file|not found/i.test(message)) { return []; }
+      if (allowMissing && (isRemoteMissingError(error) || isRemoteNotDirectoryError(error))) {return [];}
       throw error;
     }
   }
 
+  private signaturesMatch(actual: DiffSignature | undefined, expected: DiffSignature): boolean {
+    return Boolean(actual
+      && actual.type === expected.type
+      && actual.size === expected.size
+      && actual.modifyTime === expected.modifyTime);
+  }
+
+  private createSynchronizedSignatures(record: DiffRecord): SynchronizedSignatures | undefined {
+    if (record.type !== 'file'
+      || record.local?.type !== 'file'
+      || record.remote?.type !== 'file'
+      || record.local.size !== record.remote.size) {return undefined;}
+    return {
+      local: { ...record.local },
+      remote: { ...record.remote }
+    };
+  }
+
+  private hasMatchingSynchronizedSignatures(record: DiffRecord): boolean {
+    return Boolean(record.synchronized
+      && this.signaturesMatch(record.local, record.synchronized.local)
+      && this.signaturesMatch(record.remote, record.synchronized.remote));
+  }
+
   private diffStatus(record: DiffRecord): DiffRecord['status'] {
+    if (this.hasMatchingSynchronizedSignatures(record)) {return 'same';}
     return classifyDiff(record, this.localDirtyPaths.has(record.path));
   }
 
@@ -1191,7 +1881,8 @@ export class SettingsPanel implements vscode.Disposable {
     connection: BaseConnection,
     config: FTPConfig,
     paths: string[],
-    records: Map<string, DiffRecord>
+    records: Map<string, DiffRecord>,
+    verifiedCleanPaths: Set<string>
   ): Promise<void> {
     if (!this.scope) {return;}
     const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
@@ -1210,9 +1901,9 @@ export class SettingsPanel implements vscode.Disposable {
     for (const record of candidates) {
       try {
         const local = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.localRoot(config), ...record.path.split('/')));
-        const remote = await connection.readFile(`${root}/${record.path}`);
+        const remote = await connection.readFile(joinRemotePath(root, record.path));
         if (Buffer.from(local).equals(Buffer.from(remote))) {
-          this.localDirtyPaths.delete(record.path);
+          verifiedCleanPaths.add(record.path);
         }
       } catch {
         // Keep the watcher-derived modified state when verification is unavailable.
@@ -1221,8 +1912,8 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private async readDiffFile(direction: 'local' | 'remote', relativePath: unknown, value: unknown): Promise<void> {
-    const filePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!filePath || filePath.includes('../')) {return;}
+    const filePath = normalizeRemoteRelativePath(relativePath);
+    if (!filePath) {return;}
     if (direction === 'local') {
       const record = this.latestDiffRecords.get(filePath);
       const describe = (entry?: { size?: number; modifyTime?: number }): string => entry
@@ -1230,7 +1921,7 @@ export class SettingsPanel implements vscode.Disposable {
         : 'missing';
       logger.info(`ITFFTP diff file selected: ${filePath}; local=${describe(record?.local)}; remote=${describe(record?.remote)}; status=${record?.status || 'unknown'}`);
     }
-    const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig();
+    const config = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig();
     if (!config) {throw new Error('Select a host before reading a file.');}
     try {
       let content = '';
@@ -1241,11 +1932,11 @@ export class SettingsPanel implements vscode.Disposable {
       } else {
         const connection = await connectionManager.connect(config);
         const root = (config.remotePath || '/').replace(/\/$/, '');
-        content = (await connection.readFile(`${root}/${filePath}`)).toString('utf8');
+        content = (await connection.readFile(joinRemotePath(root, filePath))).toString('utf8');
       }
       this.panel?.webview.postMessage({ type: 'diffFile', direction, path: filePath, content });
-    } catch (error: any) {
-      const details = String(error?.message || error || '');
+    } catch (error) {
+      const details = errorMessage(error, '');
       const missing = /ENOENT|no such file|not found/i.test(details);
       this.panel?.webview.postMessage({
         type: 'diffFile',
@@ -1257,14 +1948,17 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private async handleDiffAction(action: string, direction: 'local' | 'remote', relativePath: unknown, value: unknown, preparationJobId?: string): Promise<void> {
-    const filePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!filePath || filePath.includes('../')) {return;}
-    // Tree paths are normalized without a trailing slash. Use the paired scan
-    // record as the source of truth so folder actions stay recursive.
-    const isDirectory = this.latestDiffRecords.get(filePath)?.type === 'directory' || filePath.endsWith('/');
+    const filePath = normalizeRemoteRelativePath(relativePath);
+    if (!filePath) {return;}
+    // Aggregate rows use "directory" when either side is a directory. Actions
+    // must instead use the selected/source side or a local-file/remote-folder
+    // collision is mistaken for a recursive folder action.
+    const initialRecord = this.latestDiffRecords.get(filePath);
+    const initialSelectedEntry = direction === 'local' ? initialRecord?.local : initialRecord?.remote;
+    let isDirectory = initialSelectedEntry?.type === 'directory' || filePath.endsWith('/');
     const relativeSegments = filePath.replace(/\/$/, '').split('/');
     if (!this.scope) {throw new Error('No workspace is selected.');}
-    const config = this.parseConnections(value)[0] || connectionManager.getPrimaryConfig() || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
+    const config = this.resolveConnections(value)[0] || connectionManager.getPrimaryConfig() || configManager.getConfigs(this.scope.fsPath).find(candidate => candidate.default) || configManager.getConfigs(this.scope.fsPath)[0];
     if (!config) {throw new Error('Select a host before using this action.');}
     if (isDirectory && (action === 'upload' || action === 'download')) {
       // Folder transfers use only changed files, so complete this subtree just
@@ -1274,75 +1968,95 @@ export class SettingsPanel implements vscode.Disposable {
     const connection = await connectionManager.connect(config);
     const transferConfig = this.withDashboardSyncMode(config);
     const remoteRoot = (config.remotePath || '/').replace(/\/$/, '');
-    const remotePath = `${remoteRoot}/${filePath.replace(/\/$/, '')}`;
+    const remotePath = joinRemotePath(remoteRoot, filePath.replace(/\/$/, ''));
     const record = this.latestDiffRecords.get(filePath);
+    const selectedEntry = direction === 'local' ? record?.local : record?.remote;
+    isDirectory = selectedEntry ? selectedEntry.type === 'directory' : isDirectory;
     const localRoot = this.localRoot(config);
     const localUri = vscode.Uri.joinPath(localRoot, ...relativeSegments);
     let transferredPaths: string[] | undefined;
     if (action === 'upload' && direction === 'local') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Uploading ${filePath}`, percentage: 0 });
-      if (isDirectory) {
-        const changedFiles = this.getChangedSubtreeFiles(filePath, 'upload');
-        if (!changedFiles.length) {
-          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files under ${filePath}`, percentage: 100 });
+      const selectedCandidate = record ? this.getTransferCandidates([record], 'upload')[0] : undefined;
+      if (isDirectory && selectedCandidate?.type === 'directory') {
+        this.removeDashboardJob(preparationJobId);
+        const outcome = await this.transferDiffCandidate(connection, selectedCandidate, 'upload', transferConfig);
+        if (outcome.status !== 'completed') {
+          this.reportSkippedTransfers([{ path: filePath, reason: outcome.reason }]);
+          return;
+        }
+        transferredPaths = [filePath];
+      } else if (isDirectory) {
+        const changedEntries = this.getChangedSubtreeFiles(filePath, 'upload');
+        if (!changedEntries.length) {
+          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed entries under ${filePath}`, percentage: 100 });
           return;
         }
         this.removeDashboardJob(preparationJobId);
-        const settled = await Promise.allSettled(changedFiles.map(candidate => {
-          const candidateLocal = vscode.Uri.joinPath(localRoot, ...candidate.path.split('/'));
-          return transferManager.uploadFile(connection, candidateLocal.fsPath, `${remoteRoot}/${candidate.path}`, transferConfig, {
-            size: candidate.local?.size,
-            targetExists: Boolean(candidate.remote),
-            targetType: 'file'
-          });
-        }));
-        const completed = changedFiles.filter((_, index) => settled[index].status === 'fulfilled').map(candidate => candidate.path);
-        const failed = settled.length - completed.length;
-        if (failed) {
-          if (completed.length) {await this.refreshAfterTransfer(completed, 'upload', config);}
-          throw new Error(`Uploaded ${completed.length} changed files; ${failed} failed.`);
+        const settled = await Promise.allSettled(changedEntries.map(candidate =>
+          this.transferDiffCandidate(connection, candidate, 'upload', transferConfig)
+        ));
+        const { completedPaths, skipped, failedCount } = this.classifySettledTransfers(
+          changedEntries.map(candidate => candidate.path),
+          settled
+        );
+        if (failedCount || skipped.length) {
+          if (completedPaths.length) {await this.refreshAfterTransfer(completedPaths, 'upload', config);}
+          this.reportSkippedTransfers(skipped);
+          if (failedCount) {throw new Error(`Uploaded ${completedPaths.length} changed entries; ${failedCount} failed.`);}
+          return;
         }
-        transferredPaths = completed;
+        transferredPaths = completedPaths;
       }
       else {
+        if (!selectedCandidate) {throw new Error(`The local source no longer exists: ${filePath}`);}
         this.removeDashboardJob(preparationJobId);
-        await transferManager.uploadFile(connection, localUri.fsPath, remotePath, transferConfig, {
-          size: record?.local?.size,
-          targetExists: Boolean(record?.remote),
-          targetType: 'file'
-        });
+        const outcome = await this.transferDiffCandidate(connection, selectedCandidate, 'upload', transferConfig);
+        if (outcome.status !== 'completed') {
+          this.reportSkippedTransfers([{ path: filePath, reason: outcome.reason }]);
+          return;
+        }
       }
     } else if (action === 'download' && direction === 'remote') {
       this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: true, label: `Downloading ${filePath}`, percentage: 0 });
-      if (isDirectory) {
-        const changedFiles = this.getChangedSubtreeFiles(filePath, 'download');
-        if (!changedFiles.length) {
-          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed files under ${filePath}`, percentage: 100 });
+      const selectedCandidate = record ? this.getTransferCandidates([record], 'download')[0] : undefined;
+      if (isDirectory && selectedCandidate?.type === 'directory') {
+        this.removeDashboardJob(preparationJobId);
+        const outcome = await this.transferDiffCandidate(connection, selectedCandidate, 'download', transferConfig);
+        if (outcome.status !== 'completed') {
+          this.reportSkippedTransfers([{ path: filePath, reason: outcome.reason }]);
+          return;
+        }
+        transferredPaths = [filePath];
+      } else if (isDirectory) {
+        const changedEntries = this.getChangedSubtreeFiles(filePath, 'download');
+        if (!changedEntries.length) {
+          this.panel?.webview.postMessage({ type: 'diffTransferProgress', active: false, label: `No changed entries under ${filePath}`, percentage: 100 });
           return;
         }
         this.removeDashboardJob(preparationJobId);
-        const settled = await Promise.allSettled(changedFiles.map(candidate => {
-          const candidateLocal = vscode.Uri.joinPath(localRoot, ...candidate.path.split('/'));
-          return transferManager.downloadFile(connection, `${remoteRoot}/${candidate.path}`, candidateLocal.fsPath, transferConfig, {
-            size: candidate.remote?.size,
-            targetExists: Boolean(candidate.local),
-            targetType: 'file'
-          });
-        }));
-        const completed = changedFiles.filter((_, index) => settled[index].status === 'fulfilled').map(candidate => candidate.path);
-        const failed = settled.length - completed.length;
-        if (failed) {
-          if (completed.length) {await this.refreshAfterTransfer(completed, 'download', config);}
-          throw new Error(`Downloaded ${completed.length} changed files; ${failed} failed.`);
+        const settled = await Promise.allSettled(changedEntries.map(candidate =>
+          this.transferDiffCandidate(connection, candidate, 'download', transferConfig)
+        ));
+        const { completedPaths, skipped, failedCount } = this.classifySettledTransfers(
+          changedEntries.map(candidate => candidate.path),
+          settled
+        );
+        if (failedCount || skipped.length) {
+          if (completedPaths.length) {await this.refreshAfterTransfer(completedPaths, 'download', config);}
+          this.reportSkippedTransfers(skipped);
+          if (failedCount) {throw new Error(`Downloaded ${completedPaths.length} changed entries; ${failedCount} failed.`);}
+          return;
         }
-        transferredPaths = completed;
+        transferredPaths = completedPaths;
       } else {
+        if (!selectedCandidate) {throw new Error(`The remote source no longer exists: ${filePath}`);}
         this.removeDashboardJob(preparationJobId);
-        await transferManager.downloadFile(connection, remotePath, localUri.fsPath, transferConfig, {
-          size: record?.remote?.size,
-          targetExists: Boolean(record?.local),
-          targetType: 'file'
-        });
+        const outcome = await this.transferDiffCandidate(connection, selectedCandidate, 'download', transferConfig);
+        if (outcome.status !== 'completed') {
+          this.reportSkippedTransfers([{ path: filePath, reason: outcome.reason }]);
+          return;
+        }
       }
     }
     else if (action === 'delete') {
@@ -1372,26 +2086,20 @@ export class SettingsPanel implements vscode.Disposable {
         throw error;
       }
     } else if (action === 'rename') {
-      const nextName = await vscode.window.showInputBox({ prompt: 'New file name', value: filePath.split('/').pop() });
-      if (!nextName || nextName.includes('/') || nextName.includes('\\')) {return;}
+      const nextNameInput = await vscode.window.showInputBox({
+        prompt: 'New file name',
+        value: filePath.split('/').pop(),
+        validateInput: candidate => safeRemoteEntryName(candidate.trim())
+          ? undefined
+          : 'Enter one name without slashes, dot segments, or control characters.'
+      });
+      if (!nextNameInput) {return;}
+      const nextName = nextNameInput.trim();
+      if (!safeRemoteEntryName(nextName)) {throw new Error('New file name is invalid.');}
       const nextRelative = `${filePath.slice(0, filePath.lastIndexOf('/') + 1)}${nextName}`;
       if (direction === 'local') {await vscode.workspace.fs.rename(localUri, vscode.Uri.joinPath(localRoot, ...nextRelative.split('/')), { overwrite: false });}
-      else {await connection.rename(remotePath, `${remoteRoot}/${nextRelative}`);}
+      else {await connection.rename(remotePath, joinRemotePath(remoteRoot, nextRelative));}
     }
-    // Update the visible row as soon as the transfer itself succeeds.  A full
-    // recursive refresh can take a while on large remote sites, and must not
-    // leave the dashboard looking stale until that background work completes.
-    if (action === 'upload' || action === 'download') {
-      const prefix = filePath.replace(/\/$/, '');
-      for (const dirtyPath of [...this.localDirtyPaths]) {
-        if (dirtyPath === prefix || dirtyPath.startsWith(`${prefix}/`)) {this.localDirtyPaths.delete(dirtyPath);}
-      }
-    }
-    const normalizedPath = filePath.replace(/\/$/, '');
-    const parentPath = normalizedPath.includes('/') ? normalizedPath.slice(0, normalizedPath.lastIndexOf('/')) : '';
-    const root = (config.remotePath || '/').replace(/\\/g, '/').replace(/\/+$/g, '') || '/';
-    const remoteDirectory = parentPath ? `${root}/${parentPath}` : root;
-    this.diffDirectoryCache.delete(`${config.protocol}:${config.host}:${config.port || ''}:${remoteDirectory}`);
     logger.info(`ITFFTP diff ${action} completed: ${filePath}; updating cached comparison`);
     if (action === 'upload' || action === 'download') {
       await this.refreshAfterTransfer(transferredPaths || [filePath], action, config);
@@ -1403,16 +2111,16 @@ export class SettingsPanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'diffActionComplete', action, direction, path: filePath });
   }
 
-  private getChangedSubtreeFiles(folderPath: string, direction: 'upload' | 'download'): DiffRecord[] {
+  private getChangedSubtreeFiles(folderPath: string, direction: 'upload' | 'download'): DiffTransferCandidate[] {
     const prefix = `${folderPath.replace(/\/$/, '')}/`;
-    return [...this.latestDiffRecords.values()]
-      .filter(record => {
-        if (record.type !== 'file' || !record.path.startsWith(prefix)) {return false;}
-        if (direction === 'upload') {
-          return Boolean(record.local) && (record.status === 'modified' || record.status === 'missing-remote' || record.status === 'type-changed');
-        }
-        return Boolean(record.remote) && (record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed');
-      })
+    const changedRecords = [...this.latestDiffRecords.values()].filter(record => {
+      if (!record.path.startsWith(prefix)) {return false;}
+      if (direction === 'upload') {
+        return Boolean(record.local) && (record.status === 'modified' || record.status === 'missing-remote' || record.status === 'type-changed');
+      }
+      return Boolean(record.remote) && (record.status === 'modified' || record.status === 'missing-local' || record.status === 'type-changed');
+    });
+    return this.getTransferCandidates(changedRecords, direction)
       .sort((left, right) => left.path.localeCompare(right.path));
   }
 
@@ -1485,35 +2193,58 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async getWorkspaceFiles(ignorePatterns: readonly string[] = DEFAULT_IGNORE_PATTERNS): Promise<string[]> {
+  private async getWorkspaceFiles(
+    ignorePatterns: readonly string[] = DEFAULT_IGNORE_PATTERNS,
+    limits: { maxEntries: number; maxDirectories: number; maxDepth: number } = {
+      maxEntries: 100_000,
+      maxDirectories: DEFAULT_MAX_SCAN_DIRECTORIES,
+      maxDepth: DEFAULT_MAX_SCAN_DEPTH
+    }
+  ): Promise<string[]> {
     if (!this.scope) {return [];}
+    if (!Number.isSafeInteger(limits.maxEntries) || limits.maxEntries < 1) {
+      throw new RangeError('Workspace inventory maxEntries must be a positive safe integer.');
+    }
 
     const files: string[] = [];
-    const queue: Array<{ uri: vscode.Uri; prefix: string; depth: number }> = [{ uri: this.scope, prefix: '', depth: 0 }];
-    while (queue.length > 0 && files.length < 10000) {
-      const current = queue.shift()!;
-      let entries: [string, vscode.FileType][];
-      try {
-        entries = await vscode.workspace.fs.readDirectory(current.uri);
-      } catch {
-        continue;
-      }
-
-      for (const [name, type] of entries) {
-        const relativePath = current.prefix ? `${current.prefix}/${name}` : name;
-        if (this.isIgnoredDiffPath(relativePath, ignorePatterns)) {continue;}
-        if (type === vscode.FileType.Directory) {
-          files.push(`${relativePath}/`);
-          if (current.depth < 12 && files.length < 10000) {
-            queue.push({ uri: vscode.Uri.joinPath(current.uri, name), prefix: relativePath, depth: current.depth + 1 });
-          }
-        } else if (type === vscode.FileType.File) {
-          files.push(relativePath);
+    await runBoundedRecursiveScan<string[]>({
+      startDirectory: '',
+      concurrency: 4,
+      maxDirectories: limits.maxDirectories,
+      maxDepth: limits.maxDepth,
+      isCancelled: () => false,
+      scanDirectory: async relativeDirectory => {
+        const directory = relativeDirectory
+          ? vscode.Uri.joinPath(this.scope!, ...relativeDirectory.split('/'))
+          : this.scope!;
+        let entries: [string, vscode.FileType][];
+        try {
+          entries = await vscode.workspace.fs.readDirectory(directory);
+        } catch (error) {
+          throw new Error(`Unable to read workspace folder ${relativeDirectory || '.'}: ${errorMessage(error)}`);
         }
-
-        if (files.length >= 10000) {break;}
+        const childDirectories: string[] = [];
+        const discoveredEntries: string[] = [];
+        for (const [name, type] of entries) {
+          const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+          if (this.isIgnoredDiffPath(relativePath, ignorePatterns)) {continue;}
+          if (type === vscode.FileType.Directory) {
+            childDirectories.push(relativePath);
+            discoveredEntries.push(`${relativePath}/`);
+          } else if (type === vscode.FileType.File) {
+            discoveredEntries.push(relativePath);
+          }
+        }
+        return { childDirectories, value: discoveredEntries };
+      },
+      onBatch: entries => {
+        const discoveredEntries = entries.flatMap(entry => entry.value);
+        if (files.length + discoveredEntries.length > limits.maxEntries) {
+          throw new Error(`Workspace inventory exceeded the maximum entry count of ${limits.maxEntries}.`);
+        }
+        files.push(...discoveredEntries);
       }
-    }
+    });
 
     return files.sort((left, right) => left.localeCompare(right));
   }

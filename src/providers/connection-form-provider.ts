@@ -11,6 +11,31 @@ import { FTPConfig, Protocol } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 
+interface ConnectionFormConfigData {
+  name?: string;
+  host: string;
+  port?: string | number;
+  protocol: Protocol;
+  username: string;
+  password?: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+  remotePath?: string;
+  uploadOnSave?: boolean;
+  secure?: boolean;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) {
+      return message;
+    }
+  }
+
+  return String(error);
+}
+
 export class ConnectionFormProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'stackerftp.connectionForm';
 
@@ -104,9 +129,9 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
             vscode.commands.executeCommand('stackerftp.remoteExplorerTree.focus');
             break;
         }
-      } catch (error: any) {
+      } catch (error) {
         logger.error('ConnectionFormProvider message handler error', error);
-        statusBar.error(`Form error: ${error.message || error}`);
+        statusBar.error(`Form error: ${getErrorMessage(error)}`);
       }
     });
 
@@ -194,7 +219,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async _handleSaveConfig(configData: any, editIndex?: number) {
+  private async _handleSaveConfig(configData: ConnectionFormConfigData, editIndex?: number) {
     const workspaceRoot = await this._resolveWorkspaceRoot(true);
     if (!workspaceRoot) {
       this._view?.webview.postMessage({ type: 'saveError', message: 'No workspace folder selected' });
@@ -217,8 +242,8 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         ...existingConfig,  // Preserve existing fields (watcher, ignore, profiles, etc.)
         name: configData.name || configData.host,
         host: configData.host,
-        port: parseInt(configData.port) || (configData.protocol === 'sftp' ? 22 : 21),
-        protocol: configData.protocol as Protocol,
+        port: parseInt(String(configData.port)) || (configData.protocol === 'sftp' ? 22 : 21),
+        protocol: configData.protocol,
         username: configData.username,
         password: configData.password || undefined,
         privateKeyPath: configData.privateKeyPath || undefined,
@@ -243,9 +268,10 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       statusBar.success('Connection saved');
       vscode.window.showInformationMessage(`ITFFTP: Saved to ${configManager.getConfigPath(workspaceRoot)}`);
       await this._sendConfigs();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'saveError', message: error.message });
-      statusBar.error(`Failed to save: ${error.message}`);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this._view?.webview.postMessage({ type: 'saveError', message });
+      statusBar.error(`Failed to save: ${message}`);
     }
   }
 
@@ -272,15 +298,15 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
     statusBar.success('Connection deleted');
   }
 
-  private async _handleTestConnection(configData: any) {
+  private async _handleTestConnection(configData: ConnectionFormConfigData) {
     this._view?.webview.postMessage({ type: 'testing' });
 
     try {
       const testConfig: FTPConfig = {
         name: configData.name || 'Test',
         host: configData.host,
-        port: parseInt(configData.port) || (configData.protocol === 'sftp' ? 22 : 21),
-        protocol: configData.protocol as Protocol,
+        port: parseInt(String(configData.port)) || (configData.protocol === 'sftp' ? 22 : 21),
+        protocol: configData.protocol,
         username: configData.username,
         password: configData.password || undefined,
         privateKeyPath: configData.privateKeyPath || undefined,
@@ -289,15 +315,14 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         secure: configData.secure || false
       };
 
-      const connection = await connectionManager.connect(testConfig);
-      await connection.list(testConfig.remotePath);
-      await connectionManager.disconnect(testConfig);
+      await connectionManager.testConnection(testConfig);
 
       this._view?.webview.postMessage({ type: 'testSuccess' });
       statusBar.success('Connection test successful!');
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'testError', message: error.message });
-      statusBar.error(`Connection test failed: ${error.message}`);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this._view?.webview.postMessage({ type: 'testError', message });
+      statusBar.error(`Connection test failed: ${message}`);
     }
   }
 
@@ -319,14 +344,15 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         // Focus and reveal Remote Explorer view
         vscode.commands.executeCommand('stackerftp.remoteExplorerTree.focus');
       }, 100);
-    } catch (error: any) {
+    } catch (error) {
+      const message = getErrorMessage(error);
       this._view?.webview.postMessage({
         type: 'connectionError',
         index,
-        message: error?.message || String(error)
+        message
       });
       await this._sendConfigs();
-      statusBar.error(`Connection failed: ${error.message}`, true);
+      statusBar.error(`Connection failed: ${message}`, true);
     }
   }
 
@@ -343,8 +369,8 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       statusBar.success(`Disconnected: ${configs[index].name || configs[index].host}`);
       // Refresh remote explorer to clear the connection
       vscode.commands.executeCommand('stackerftp.tree.refresh');
-    } catch (error: any) {
-      statusBar.error(`Disconnect failed: ${error.message}`, true);
+    } catch (error) {
+      statusBar.error(`Disconnect failed: ${getErrorMessage(error)}`, true);
     }
   }
 

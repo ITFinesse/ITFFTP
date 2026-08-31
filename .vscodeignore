@@ -27,11 +27,17 @@ dist-test/**
 coverage/**
 
 # Internal documentation and tools
+scripts/**
+tests/**
 DEVELOPMENT.md
 FEATURE_PLAN.md
 FEATURES.md
+CONTRIBUTING.md
+RemediationBacklog.md
 AGENTS.md
 LEAN-CTX.md
+.clineignore
+package-lock.json
 .lean-ctx/
 .claude/
 brain/
@@ -51,3 +57,16 @@ publish.sh
 build.sh
 .snapshotfinesse/
 .playwright-cli/**
+
+# Credential-bearing local configuration must never be packaged
+.npmrc
+.env
+.env.*
+**/.env
+**/.env.*
+**/sftp.json
+**/*.key
+**/*.p12
+**/*.pem
+**/*.pfx
+**/*.ppk

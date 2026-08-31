@@ -11,12 +11,21 @@ import * as os from 'os';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { transferManager } from '../core/transfer-manager';
+import { isTransferCompleted, skippedTransferMessage } from '../core/transfer-outcome';
 import { webMasterTools } from '../webmaster/tools';
 import { getWorkspaceRoot } from '../commands/utils';
 import { CompareResult, CompareTreeNode, CompareItem } from '../types';
-import { formatFileSize, normalizeRemotePath } from '../utils/helpers';
+import { FTPConfig } from '../types';
+import { BaseConnection } from '../core/connection';
+import { errorMessage, formatFileSize, normalizeRemotePath, resolveLocalRoot } from '../utils/helpers';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
+
+type CompareViewMessage =
+  | { type: 'setFilter'; filter: 'all' | 'local' | 'remote' | 'different' }
+  | { type: 'search' | 'toggleFolder' | 'showDiff' | 'upload' | 'download' | 'revealLocal' | 'revealRemote'; path?: string; query?: string }
+  | { type: 'export'; format: 'json' | 'csv' }
+  | { type: 'refresh' };
 
 export class CompareViewProvider {
   public static readonly viewType = 'stackerftp.compareView';
@@ -25,9 +34,9 @@ export class CompareViewProvider {
   private _extensionUri: vscode.Uri;
   private _compareResult?: CompareResult;
   private _workspaceRoot?: string;
-  private _originalWorkspaceRoot?: string;
-  private _config?: any;
-  private _connection?: any;
+  private _remoteRoot?: string;
+  private _config?: FTPConfig;
+  private _connection?: BaseConnection;
   private _filter: 'all' | 'local' | 'remote' | 'different' = 'all';
   private _searchQuery: string = '';
   private _expandedFolders: Set<string> = new Set();
@@ -49,16 +58,17 @@ export class CompareViewProvider {
 
     const config = configManager.getActiveConfig(workspaceRoot);
     if (!config) {
-      vscode.window.showErrorMessage('No SFTP configuration found');
+      vscode.window.showErrorMessage('No ITFFTP configuration found');
       return;
     }
 
     // Allow user to select a local folder if not provided
     let selectedLocalPath = localPath;
+    const configuredLocalRoot = resolveLocalRoot(workspaceRoot, config.localPath);
     if (!selectedLocalPath) {
       const selected = await vscode.window.showOpenDialog({
         title: 'Select Local Folder to Compare',
-        defaultUri: vscode.Uri.file(workspaceRoot),
+        defaultUri: vscode.Uri.file(configuredLocalRoot),
         canSelectFolders: true,
         canSelectFiles: false,
         canSelectMany: false
@@ -71,10 +81,8 @@ export class CompareViewProvider {
       selectedLocalPath = selected[0].fsPath;
     }
 
-    // Store original workspace root for path calculations
     this._workspaceRoot = selectedLocalPath;
     this._config = config;
-    this._originalWorkspaceRoot = workspaceRoot;
 
     // Reset state for new comparison
     this._compareResult = undefined;
@@ -111,13 +119,19 @@ export class CompareViewProvider {
     // Show loading state immediately
     this._panel.webview.html = this._getLoadingHtml('Connecting to server...');
 
-    // Calculate the remote path based on selected local folder
-    const originalWorkspace = this._originalWorkspaceRoot || workspaceRoot;
+    // Map a selected descendant of the configured local root to the same
+    // relative directory below the configured remote root.
     let remotePath = config.remotePath;
-    if (this._workspaceRoot && this._workspaceRoot !== originalWorkspace && this._workspaceRoot.startsWith(originalWorkspace)) {
-      const relativePath = path.relative(originalWorkspace, this._workspaceRoot);
+    const relativePath = path.relative(configuredLocalRoot, selectedLocalPath);
+    const isConfiguredDescendant = relativePath === '' || (
+      relativePath !== '..' &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath)
+    );
+    if (isConfiguredDescendant && relativePath) {
       remotePath = normalizeRemotePath(path.join(config.remotePath, relativePath));
     }
+    this._remoteRoot = remotePath;
 
     try {
       // Ensure connection
@@ -162,11 +176,11 @@ export class CompareViewProvider {
         this._updateView();
       });
 
-    } catch (error: any) {
+    } catch (error) {
       this._isComparing = false;
       // Only show error if panel still exists
       if (this._panel) {
-        this._updateHtml(this._getErrorHtml(error.message));
+          this._updateHtml(this._getErrorHtml(errorMessage(error)));
       }
       logger.error('Compare folders failed', error);
     }
@@ -252,7 +266,7 @@ export class CompareViewProvider {
   /**
    * Handle messages from webview
    */
-  private _handleMessage = async (data: any): Promise<void> => {
+  private _handleMessage = async (data: CompareViewMessage): Promise<void> => {
     switch (data.type) {
       case 'setFilter':
         this._filter = data.filter;
@@ -260,32 +274,32 @@ export class CompareViewProvider {
         break;
 
       case 'search':
-        this._searchQuery = data.query;
+        this._searchQuery = data.query ?? '';
         this._updateView();
         break;
 
       case 'toggleFolder':
-        this._toggleFolder(data.path);
+        this._toggleFolder(data.path ?? '');
         break;
 
       case 'showDiff':
-        await this._showDiff(data.path);
+        await this._showDiff(data.path ?? '');
         break;
 
       case 'upload':
-        await this._uploadFile(data.path);
+        await this._uploadFile(data.path ?? '');
         break;
 
       case 'download':
-        await this._downloadFile(data.path);
+        await this._downloadFile(data.path ?? '');
         break;
 
       case 'revealLocal':
-        await this._revealLocal(data.path);
+        await this._revealLocal(data.path ?? '');
         break;
 
       case 'revealRemote':
-        await this._revealRemote(data.path);
+        await this._revealRemote(data.path ?? '');
         break;
 
       case 'export':
@@ -317,7 +331,7 @@ export class CompareViewProvider {
     if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
-    const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
+    const remotePath = normalizeRemotePath(path.join(this._remoteRoot || this._config.remotePath, filePath));
 
     // Check if local file exists
     if (!fs.existsSync(localPath)) {
@@ -344,8 +358,8 @@ export class CompareViewProvider {
         { preview: true }
       );
 
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Diff failed: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Diff failed: ${errorMessage(error)}`);
     }
   }
 
@@ -356,7 +370,7 @@ export class CompareViewProvider {
     if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
-    const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
+    const remotePath = normalizeRemotePath(path.join(this._remoteRoot || this._config.remotePath, filePath));
 
     try {
       // Ensure remote directory exists
@@ -365,14 +379,18 @@ export class CompareViewProvider {
         await this._connection.mkdir(remoteDir);
       } catch { /* Directory may already exist. */ }
 
-      await transferManager.uploadFile(this._connection, localPath, remotePath, this._config);
+      const outcome = await transferManager.uploadFile(this._connection, localPath, remotePath, this._config);
+      if (!isTransferCompleted(outcome)) {
+        void vscode.window.showWarningMessage(skippedTransferMessage('Upload', filePath, outcome));
+        return;
+      }
       statusBar.success(`Uploaded: ${path.basename(filePath)}`);
 
       // Refresh comparison
       await this._refresh();
 
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Upload failed: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Upload failed: ${errorMessage(error)}`);
     }
   }
 
@@ -383,7 +401,7 @@ export class CompareViewProvider {
     if (!this._workspaceRoot || !this._config || !this._connection) {return;}
 
     const localPath = path.join(this._workspaceRoot, filePath);
-    const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
+    const remotePath = normalizeRemotePath(path.join(this._remoteRoot || this._config.remotePath, filePath));
 
     try {
       // Ensure local directory exists
@@ -392,14 +410,18 @@ export class CompareViewProvider {
         fs.mkdirSync(localDir, { recursive: true });
       }
 
-      await transferManager.downloadFile(this._connection, remotePath, localPath);
+      const outcome = await transferManager.downloadFile(this._connection, remotePath, localPath, this._config);
+      if (!isTransferCompleted(outcome)) {
+        void vscode.window.showWarningMessage(skippedTransferMessage('Download', filePath, outcome));
+        return;
+      }
       statusBar.success(`Downloaded: ${path.basename(filePath)}`);
 
       // Refresh comparison
       await this._refresh();
 
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Download failed: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Download failed: ${errorMessage(error)}`);
     }
   }
 
@@ -425,13 +447,10 @@ export class CompareViewProvider {
     if (!this._config) {return;}
 
     const remotePath = normalizeRemotePath(path.join(this._config.remotePath, filePath));
-
-    // Focus on remote explorer and try to navigate
-    await vscode.commands.executeCommand('stackerftp.remoteExplorerTree.focus');
-
-    // Try to navigate to path if method exists
-    // This is best-effort
-    statusBar.success(`Remote path: ${remotePath}`);
+    await vscode.commands.executeCommand('stackerftp.openSettings');
+    void vscode.window.showInformationMessage(
+      `Opened Transfer. The retired Remote Explorer path maps to: ${remotePath}`
+    );
   }
 
   /**
@@ -481,8 +500,8 @@ export class CompareViewProvider {
       fs.writeFileSync(uri.fsPath, content);
       statusBar.success(`Exported to: ${uri.fsPath}`);
 
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Export failed: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Export failed: ${errorMessage(error)}`);
     }
   }
 
@@ -498,7 +517,7 @@ export class CompareViewProvider {
       this._compareResult = await webMasterTools.compareFolders(
         this._connection,
         this._workspaceRoot,
-        this._config.remotePath,
+        this._remoteRoot || this._config.remotePath,
         {
           useMtime: true,
           onProgress: (message) => {
@@ -513,8 +532,8 @@ export class CompareViewProvider {
       this._updateView();
       statusBar.success('Comparison refreshed');
 
-    } catch (error: any) {
-      this._updateHtml(this._getErrorHtml(error.message));
+    } catch (error) {
+      this._updateHtml(this._getErrorHtml(errorMessage(error)));
     }
   }
 

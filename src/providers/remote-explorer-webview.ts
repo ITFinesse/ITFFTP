@@ -9,14 +9,15 @@ import * as path from 'path';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { transferManager } from '../core/transfer-manager';
+import { isTransferCompleted, skippedTransferMessage } from '../core/transfer-outcome';
 import { BaseConnection } from '../core/connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { formatFileSize, formatDate, normalizeRemotePath, resolveLocalRoot } from '../utils/helpers';
+import { errorMessage, formatFileSize, formatDate, normalizeRemotePath, resolveLocalRoot } from '../utils/helpers';
 import * as fs from 'fs';
 
-export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider {
+export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'stackerftp.remoteExplorer';
 
   private _view?: vscode.WebviewView;
@@ -28,11 +29,17 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
   private _showHiddenFiles: boolean = false;
   private _sortBy: 'name' | 'size' | 'date' = 'name';
   private _sortAscending: boolean = true;
+  private readonly _disposables: vscode.Disposable[] = [];
 
   constructor(private readonly _extensionUri: vscode.Uri) {
-    connectionManager.onConnectionChanged(() => {
+    this._disposables.push(connectionManager.onConnectionChanged(() => {
       this.refresh();
-    });
+    }));
+  }
+
+  public dispose(): void {
+    for (const disposable of this._disposables.splice(0)) {disposable.dispose();}
+    this._view = undefined;
   }
 
   public resolveWebviewView(
@@ -49,7 +56,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-    webviewView.webview.onDidReceiveMessage(async (data) => {
+    this._disposables.push(webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case 'checkConnection':
           await this._checkConnectionStatus();
@@ -115,7 +122,7 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
           await this._openFileInEditor(data.path, data.name);
           break;
       }
-    });
+    }));
 
     this._checkConnectionStatus();
   }
@@ -195,10 +202,10 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       });
 
       await this._handleListDirectory(this._currentPath);
-    } catch (error: any) {
+    } catch (error: unknown) {
       this._view.webview.postMessage({
         type: 'error',
-        message: `Connection failed: ${error.message}`
+        message: `Connection failed: ${errorMessage(error)}`
       });
     }
   }
@@ -261,10 +268,10 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       });
 
       await this._handleListDirectory(this._currentPath);
-    } catch (error: any) {
+    } catch (error: unknown) {
       this._view.webview.postMessage({
         type: 'error',
-        message: `Connection failed: ${error.message}`
+        message: `Connection failed: ${errorMessage(error)}`
       });
     }
   }
@@ -328,10 +335,10 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
         sortBy: this._sortBy,
         sortAscending: this._sortAscending
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       this._view.webview.postMessage({
         type: 'error',
-        message: `Failed to list directory: ${error.message}`
+        message: `Failed to list directory: ${errorMessage(error)}`
       });
     }
   }
@@ -348,6 +355,16 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
     if (this._currentPath) {
       await this._handleListDirectory(this._currentPath);
     }
+  }
+
+  private async _refreshAfterOperation(): Promise<void> {
+    const workspaceRoot = this._getWorkspaceRoot();
+    const configuration = vscode.workspace.getConfiguration(
+      'stackerftp',
+      workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined
+    );
+    if (!configuration.get<boolean>('autoRefresh', true)) {return;}
+    await this._handleRefresh();
   }
 
   private async _handlePreview(filePath: string, fileName: string) {
@@ -382,8 +399,8 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       } else {
         statusBar.warn('Preview not available for this file type');
       }
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Preview failed: ${error.message}` });
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Preview failed: ${errorMessage(error)}` });
     }
   }
 
@@ -412,16 +429,26 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
       if (isDirectory) {
         const result = await transferManager.downloadDirectory(this._connection, remotePath, localPath, this._currentConfig);
+        if (result.failed.length > 0 || result.skipped.length > 0) {
+          void vscode.window.showWarningMessage(
+            `Download incomplete: ${result.downloaded.length} downloaded, ${result.skipped.length} skipped, ${result.failed.length} failed.`
+          );
+          return;
+        }
         this._view?.webview.postMessage({
           type: 'downloadComplete',
           message: `Downloaded: ${result.downloaded.length} files`
         });
       } else {
-        await transferManager.downloadFile(this._connection, remotePath, localPath, this._currentConfig);
+        const outcome = await transferManager.downloadFile(this._connection, remotePath, localPath, this._currentConfig);
+        if (!isTransferCompleted(outcome)) {
+          void vscode.window.showWarningMessage(skippedTransferMessage('Download', remotePath, outcome));
+          return;
+        }
         this._view?.webview.postMessage({ type: 'downloadComplete', localPath });
       }
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Download failed: ${error.message}` });
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Download failed: ${errorMessage(error)}` });
     }
   }
 
@@ -442,9 +469,9 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       } else {
         await this._connection.delete(filePath);
       }
-      await this._handleRefresh();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Delete failed: ${error.message}` });
+      await this._refreshAfterOperation();
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Delete failed: ${errorMessage(error)}` });
     }
   }
 
@@ -454,9 +481,9 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
     try {
       const newPath = normalizeRemotePath(path.join(this._currentPath, name));
       await this._connection.mkdir(newPath);
-      await this._handleRefresh();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Create folder failed: ${error.message}` });
+      await this._refreshAfterOperation();
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Create folder failed: ${errorMessage(error)}` });
     }
   }
 
@@ -466,9 +493,9 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
     try {
       const newPath = normalizeRemotePath(path.join(path.dirname(oldPath), newName));
       await this._connection.rename(oldPath, newPath);
-      await this._handleRefresh();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Rename failed: ${error.message}` });
+      await this._refreshAfterOperation();
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Rename failed: ${errorMessage(error)}` });
     }
   }
 
@@ -477,9 +504,9 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
     try {
       await this._connection.chmod(filePath, parseInt(mode, 8));
-      await this._handleRefresh();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Chmod failed: ${error.message}` });
+      await this._refreshAfterOperation();
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Chmod failed: ${errorMessage(error)}` });
     }
   }
 
@@ -495,11 +522,11 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
       const newPath = normalizeRemotePath(path.join(path.dirname(filePath), newName));
 
       await this._connection.writeFile(newPath, content);
-      await this._handleRefresh();
+      await this._refreshAfterOperation();
 
       statusBar.success(`Duplicated: ${newName}`);
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Duplicate failed: ${error.message}` });
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Duplicate failed: ${errorMessage(error)}` });
     }
   }
 
@@ -612,9 +639,9 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
         const buffer = Buffer.from(file.content, 'base64');
         await this._connection.writeFile(remotePath, buffer);
       }
-      await this._handleRefresh();
-    } catch (error: any) {
-      this._view?.webview.postMessage({ type: 'error', message: `Upload failed: ${error.message}` });
+      await this._refreshAfterOperation();
+    } catch (error: unknown) {
+      this._view?.webview.postMessage({ type: 'error', message: `Upload failed: ${errorMessage(error)}` });
     }
   }
 
@@ -660,10 +687,10 @@ export class RemoteExplorerWebviewProvider implements vscode.WebviewViewProvider
 
       logger.info(`Opened remote file: ${filePath} -> ${localPath}`);
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       this._view?.webview.postMessage({ type: 'fileLoading', path: filePath, loading: false });
-      this._view?.webview.postMessage({ type: 'error', message: `Failed to open file: ${error.message}` });
-      vscode.window.showErrorMessage(`Failed to open file: ${error.message}`);
+      this._view?.webview.postMessage({ type: 'error', message: `Failed to open file: ${errorMessage(error)}` });
+      vscode.window.showErrorMessage(`Failed to open file: ${errorMessage(error)}`);
     }
   }
 

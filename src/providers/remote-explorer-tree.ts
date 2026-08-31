@@ -9,11 +9,12 @@ import * as path from 'path';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { transferManager } from '../core/transfer-manager';
+import { isTransferCompleted, skippedTransferMessage } from '../core/transfer-outcome';
 import { BaseConnection } from '../core/connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { formatFileSize, formatDate, normalizeRemotePath, isSystemFile } from '../utils/helpers';
+import { errorMessage, formatFileSize, formatDate, normalizeRemotePath, isSystemFile, resolveLocalRoot } from '../utils/helpers';
 import { RemoteDocumentProvider } from './remote-document-provider';
 import * as os from 'os';
 import * as fs from 'fs';
@@ -153,12 +154,9 @@ export class RemoteConfigTreeItem extends vscode.TreeItem {
   }
 }
 
-export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<RemoteTreeItem | RemoteConfigTreeItem>, vscode.FileDecorationProvider {
+export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<RemoteTreeItem | RemoteConfigTreeItem>, vscode.Disposable {
   private _onDidChangeTreeData: vscode.EventEmitter<RemoteTreeItem | RemoteConfigTreeItem | undefined | null | void> = new vscode.EventEmitter();
   readonly onDidChangeTreeData: vscode.Event<RemoteTreeItem | RemoteConfigTreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
-
-  private _onDidChangeFileDecorations: vscode.EventEmitter<vscode.Uri | vscode.Uri[]> = new vscode.EventEmitter();
-  readonly onDidChangeFileDecorations: vscode.Event<vscode.Uri | vscode.Uri[]> = this._onDidChangeFileDecorations.event;
 
   private connection: BaseConnection | undefined;
   private currentConfig: FTPConfig | undefined;
@@ -167,19 +165,17 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
   private loadingItems: Set<string> = new Set(); // Track items with inline loading
   private statusBarItem: vscode.StatusBarItem;
   private loadingTimeout: NodeJS.Timeout | undefined;
+  private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private workspaceRoot: string) {
-    // Register as file decoration provider for custom icons
-    vscode.window.registerFileDecorationProvider(this);
-
     // Create status bar item for loading indicator
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     this.statusBarItem.name = 'ITFFTP Loading';
 
     // Subscribe to connection changes
-    connectionManager.onConnectionChanged(() => {
+    this.disposables.push(connectionManager.onConnectionChanged(() => {
       this.refresh();
-    });
+    }));
   }
 
   private showLoading(message: string): void {
@@ -212,12 +208,9 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
       clearTimeout(this.loadingTimeout);
       this.loadingTimeout = undefined;
     }
+    for (const disposable of this.disposables.splice(0)) {disposable.dispose();}
+    this._onDidChangeTreeData.dispose();
     this.statusBarItem.dispose();
-  }
-
-  provideFileDecoration(_uri: vscode.Uri, _token: vscode.CancellationToken): vscode.ProviderResult<vscode.FileDecoration> {
-    // This allows us to add badges/colors to files if needed
-    return undefined;
   }
 
   refresh(): void {
@@ -228,6 +221,16 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     // Clear file cache to force fresh data
     this.fileCache.clear();
     this._onDidChangeTreeData.fire();
+  }
+
+  /** Refresh after a mutation only when the workspace preference allows it. */
+  refreshAfterOperation(): void {
+    const configuration = vscode.workspace.getConfiguration(
+      'stackerftp',
+      vscode.Uri.file(this.workspaceRoot)
+    );
+    if (!configuration.get<boolean>('autoRefresh', true)) {return;}
+    this.refresh();
   }
 
   // Refresh with loading indicator
@@ -301,8 +304,8 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
         logger.info(`Listed ${entries.length} entries`);
         this.fileCache.set(remotePath, entries);
         return this.sortEntries(entries, element.config, conn);
-      } catch (error: any) {
-        logger.error(`Failed to list: ${error.message}`, error);
+      } catch (error: unknown) {
+        logger.error(`Failed to list: ${errorMessage(error)}`, error);
         return [];
       } finally {
         this.hideLoading();
@@ -324,8 +327,8 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
         const entries = await conn.list(element.entry.path);
         this.fileCache.set(element.entry.path, entries);
         return this.sortEntries(entries, element.config, conn);
-      } catch (error: any) {
-        logger.error(`Failed to list directory: ${error.message}`, error);
+      } catch (error: unknown) {
+        logger.error(`Failed to list directory: ${errorMessage(error)}`, error);
         return [];
       } finally {
         this.hideLoading();
@@ -510,23 +513,41 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     return !!targetItem;
   }
 
-  async downloadFile(itemParam: RemoteTreeItem | FileEntry, configParam?: FTPConfig): Promise<void> {
+  async downloadFile(itemParam: RemoteTreeItem | FileEntry, configParam?: FTPConfig): Promise<boolean> {
     const item = itemParam instanceof RemoteTreeItem ? itemParam.entry : itemParam;
     const config = (itemParam instanceof RemoteTreeItem ? itemParam.config : configParam) || this.currentConfig;
-    const conn = connectionManager.getConnection(config!) || this.connection;
 
-    if (!conn || !config) {return;}
+    if (!config) {
+      statusBar.error('File or configuration missing');
+      return false;
+    }
+
+    const conn = connectionManager.getConnection(config) || this.connection;
+    if (!conn) {
+      statusBar.error('No active connection');
+      return false;
+    }
 
     const relativePath = path.relative(config.remotePath || '/', item.path);
-    const localPath = path.join(this.workspaceRoot, relativePath);
+    const localPath = path.join(resolveLocalRoot(this.workspaceRoot, config.localPath), relativePath);
 
     // If it's a directory or symlink to directory, use downloadDirectory
     if (item.type === 'directory' || (item.type === 'symlink' && item.isSymlinkToDirectory)) {
-      await transferManager.downloadDirectory(conn, item.path, localPath, config);
-      return;
+      const result = await transferManager.downloadDirectory(conn, item.path, localPath, config);
+      if (result.failed.length > 0 || result.skipped.length > 0) {
+        void vscode.window.showWarningMessage(
+          `Download incomplete: ${result.downloaded.length} downloaded, ${result.skipped.length} skipped, ${result.failed.length} failed.`
+        );
+        return false;
+      }
+      return true;
     }
 
-    await transferManager.downloadFile(conn, item.path, localPath, config);
+    const outcome = await transferManager.downloadFile(conn, item.path, localPath, config);
+    if (!isTransferCompleted(outcome)) {
+      void vscode.window.showWarningMessage(skippedTransferMessage('Download', item.path, outcome));
+      return false;
+    }
 
     // Open the file after download (only for files)
     try {
@@ -535,6 +556,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
     } catch {
       // Might not be a text file or download might have been skipped
     }
+    return true;
   }
 
   async openFile(entryParam?: FileEntry | RemoteTreeItem, configParam?: FTPConfig): Promise<void> {
@@ -614,11 +636,11 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
       await vscode.window.showTextDocument(doc, { preview: true });
 
       logger.info(`Opened remote file in memory: ${remotePath}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error('Failed to open file', error);
 
       // More specific error handling
-      const errMsg = error.message || '';
+      const errMsg = errorMessage(error, '');
       if (errMsg.includes('550') || errMsg.includes('No such file')) {
         statusBar.error(`File not found or access denied: ${fileName}`, true);
       } else if (errMsg.includes('ENOENT')) {
@@ -659,7 +681,7 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
 
       if (downloadToWorkspace) {
         const relativePath = path.relative(config.remotePath || '/', item.path);
-        targetPath = path.join(this.workspaceRoot, relativePath);
+        targetPath = path.join(resolveLocalRoot(this.workspaceRoot, config.localPath), relativePath);
       } else {
         const tempDir = path.join(os.tmpdir(), 'stackerftp', config.host);
         targetPath = path.join(tempDir, path.basename(item.path));
@@ -670,16 +692,21 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
         fs.mkdirSync(targetDir, { recursive: true });
       }
 
-      await transferManager.downloadFile(conn, item.path, targetPath, config);
+      const outcome = await transferManager.downloadFile(conn, item.path, targetPath, config);
+      if (!isTransferCompleted(outcome)) {
+        progress.complete();
+        void vscode.window.showWarningMessage(skippedTransferMessage('Download', item.path, outcome));
+        return;
+      }
 
       const targetUri = vscode.Uri.file(targetPath);
       await vscode.commands.executeCommand('vscode.open', targetUri);
 
       progress.complete();
       logger.info(`Opened binary file via transferManager: ${item.path} -> ${targetPath}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error('Failed to open binary file', error);
-      progress.fail(`Failed to open: ${error.message}`);
+      progress.fail(`Failed to open: ${errorMessage(error)}`);
     }
   }
 
@@ -764,15 +791,15 @@ export class RemoteExplorerTreeProvider implements vscode.TreeDataProvider<Remot
       const parentPath = path.dirname(item.path);
       this.fileCache.delete(parentPath);
 
-      this.refresh();
+      this.refreshAfterOperation();
       progress.complete(`Deleted: ${item.name}`);
-    } catch (error: any) {
+    } catch (error: unknown) {
       this.loadingItems.delete(item.path);
       if (itemParam instanceof RemoteTreeItem) {
         this._onDidChangeTreeData.fire(itemParam);
       }
       logger.error('Failed to delete', error);
-      progress.fail(`Failed to delete: ${error.message}`);
+      progress.fail(`Failed to delete: ${errorMessage(error)}`);
     }
   }
 

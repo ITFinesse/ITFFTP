@@ -7,9 +7,10 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { Client } from 'ssh2';
+import { Client, ConnectConfig } from 'ssh2';
 import { FTPConfig, HopConfig } from '../types';
 import { logger } from '../utils/logger';
+import { errorMessage } from '../utils/helpers';
 
 export class ConnectionHopping {
 
@@ -22,34 +23,69 @@ export class ConnectionHopping {
     }
 
     const hops = Array.isArray(targetConfig.hop) ? targetConfig.hop : [targetConfig.hop];
+    if (hops.length === 0) {
+      throw new Error('No hop configuration provided');
+    }
 
     logger.info(`Connecting through ${hops.length} hop(s)`);
 
-    // Start with first hop (direct connection)
-    let currentClient = await this.createSSHConnection(hops[0]);
+    const clients: Client[] = [];
+    try {
+      // Start with first hop (direct connection)
+      let currentClient = await this.createSSHConnection(hops[0]);
+      clients.push(currentClient);
 
-    // Chain through additional hops
-    for (let i = 1; i < hops.length; i++) {
-      const hop = hops[i];
-      logger.info(`Connecting to hop ${i + 1}: ${hop.host}`);
+      // Chain through additional hops
+      for (let i = 1; i < hops.length; i++) {
+        const hop = hops[i];
+        logger.info(`Connecting to hop ${i + 1}: ${hop.host}`);
 
-      // Forward connection through current client to next hop
-      currentClient = await this.forwardThroughClient(currentClient, hop);
+        // Forward connection through current client to next hop
+        currentClient = await this.forwardThroughClient(currentClient, hop);
+        clients.push(currentClient);
+      }
+
+      // Finally connect to target through last hop
+      const targetHop = this.toHopConfig(targetConfig);
+      logger.info(`Connecting to target through hops: ${targetConfig.host}`);
+      currentClient = await this.forwardThroughClient(currentClient, targetHop);
+      clients.push(currentClient);
+
+      this.closeUpstreamWithTerminal(currentClient, clients.slice(0, -1));
+      return currentClient;
+    } catch (error) {
+      this.closeClients(clients);
+      throw error;
     }
+  }
 
-    // Finally connect to target through last hop
-    const targetHop = this.toHopConfig(targetConfig);
-    logger.info(`Connecting to target through hops: ${targetConfig.host}`);
-    currentClient = await this.forwardThroughClient(currentClient, targetHop);
+  private closeUpstreamWithTerminal(terminal: Client, upstream: Client[]): void {
+    let closed = false;
+    const closeUpstream = (): void => {
+      if (closed) {return;}
+      closed = true;
+      this.closeClients(upstream);
+    };
+    terminal.once('error', closeUpstream);
+    terminal.once('close', closeUpstream);
+  }
 
-    return currentClient;
+  private closeClients(clients: Client[]): void {
+    for (const client of [...clients].reverse()) {
+      try {
+        client.end();
+      } catch (error) {
+        logger.warn('Failed to close SSH hop client', error);
+      }
+    }
   }
 
   private createSSHConnection(config: HopConfig): Promise<Client> {
     return new Promise((resolve, reject) => {
       const client = new Client();
+      let settled = false;
 
-      const connectConfig: any = {
+      const connectConfig: ConnectConfig = {
         host: config.host,
         port: config.port || 22,
         username: config.username,
@@ -63,7 +99,7 @@ export class ConnectionHopping {
             connectConfig.passphrase = config.passphrase;
           }
         } catch (error) {
-          reject(new Error(`Failed to load private key: ${error}`));
+          reject(new Error(`Failed to load private key: ${errorMessage(error)}`));
           return;
         }
       } else if (config.password) {
@@ -71,14 +107,26 @@ export class ConnectionHopping {
       }
 
       client.on('ready', () => {
+        settled = true;
         resolve(client);
       });
 
       client.on('error', (err) => {
+        if (settled) {return;}
+        settled = true;
+        try {client.end();} catch { /* Best-effort cleanup for a failed login. */ }
         reject(err);
       });
 
-      client.connect(connectConfig);
+      try {
+        client.connect(connectConfig);
+      } catch (error) {
+        if (!settled) {
+          settled = true;
+          try {client.end();} catch { /* Best-effort cleanup for a failed login. */ }
+          reject(error);
+        }
+      }
     });
   }
 
@@ -93,8 +141,17 @@ export class ConnectionHopping {
 
         // Create new client connection through the forwarded stream
         const newClient = new Client();
+        let settled = false;
 
-        const connectConfig: any = {
+        const fail = (error: unknown): void => {
+          if (settled) {return;}
+          settled = true;
+          stream.destroy();
+          try {newClient.end();} catch { /* Best-effort cleanup for a failed forward. */ }
+          reject(error);
+        };
+
+        const connectConfig: ConnectConfig = {
           sock: stream,
           username: target.username,
           readyTimeout: 20000
@@ -107,7 +164,7 @@ export class ConnectionHopping {
               connectConfig.passphrase = target.passphrase;
             }
           } catch (error) {
-            reject(new Error(`Failed to load private key for hop: ${error}`));
+            fail(new Error(`Failed to load private key for hop: ${errorMessage(error)}`));
             return;
           }
         } else if (target.password) {
@@ -115,14 +172,19 @@ export class ConnectionHopping {
         }
 
         newClient.on('ready', () => {
+          settled = true;
           resolve(newClient);
         });
 
         newClient.on('error', (err) => {
-          reject(err);
+          fail(err);
         });
 
-        newClient.connect(connectConfig);
+        try {
+          newClient.connect(connectConfig);
+        } catch (error) {
+          fail(error);
+        }
       });
     });
   }

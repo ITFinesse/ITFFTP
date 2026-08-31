@@ -12,6 +12,17 @@ import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 import { ConnectionHopping } from './connection-hopping';
 
+function getErrorMessage(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) {
+      return message;
+    }
+  }
+
+  return String(error);
+}
+
 interface WizardStep {
   title: string;
   execute(): Promise<boolean>;
@@ -364,8 +375,8 @@ export class ConnectionWizard {
       });
 
       logger.info(`New ${config.protocol.toUpperCase()} connection created: ${config.name}`);
-    } catch (error: any) {
-      statusBar.error(`Failed to save configuration: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Failed to save configuration: ${getErrorMessage(error)}`);
       logger.error('Failed to save new connection', error);
     }
   }

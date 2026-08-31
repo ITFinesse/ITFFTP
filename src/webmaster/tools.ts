@@ -8,7 +8,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { BaseConnection } from '../core/connection';
 import { FileEntry, ChecksumResult, SearchResult, FileInfo, FTPConfig, CompareItem, CompareTreeNode } from '../types';
-import { DEFAULT_IGNORE_PATTERNS, formatFileSize, formatDate, formatPermissions, calculateChecksum, isPathIgnored } from '../utils/helpers';
+import { DEFAULT_IGNORE_PATTERNS, formatFileSize, formatDate, formatPermissions, calculateChecksum, isPathIgnored, errorMessage } from '../utils/helpers';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
 import { lookup as lookupMimeType } from 'mime-types';
@@ -26,7 +26,7 @@ export class WebMasterTools {
     try {
       await connection.chmod(remotePath, mode);
       logger.info(`Changed permissions of ${remotePath} to ${mode}`);
-    } catch (error: any) {
+    } catch (error) {
       logger.error(`Failed to change permissions for ${remotePath}`, error);
       throw error;
     }
@@ -54,8 +54,8 @@ export class WebMasterTools {
     try {
       await this.changePermissions(connection, entry.path, parseInt(modeString, 8));
       statusBar.success(`Permissions changed for ${entry.name} to ${modeString}`);
-    } catch (error: any) {
-      statusBar.error(`Failed to change permissions: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Failed to change permissions: ${errorMessage(error)}`);
     }
   }
 
@@ -468,9 +468,9 @@ export class WebMasterTools {
       await connection.exec(`cp -r "${remotePath}" "${backupPath}"`);
       logger.info(`Backup created: ${backupPath}`);
       return backupPath;
-    } catch (error: any) {
+    } catch (error) {
       logger.error('Backup creation failed', error);
-      throw new Error(`Failed to create backup: ${error.message}`);
+      throw new Error(`Failed to create backup: ${errorMessage(error)}`);
     }
   }
 
@@ -805,7 +805,7 @@ export class WebMasterTools {
         result.failed = 1;
         logger.error('Find and replace failed', execResult.stderr);
       }
-    } catch (error: any) {
+    } catch (error) {
       result.failed = 1;
       logger.error('Find and replace error', error);
     }

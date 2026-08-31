@@ -17,3 +17,14 @@ export function isRemoteMissingError(error: unknown): boolean {
   return /\b550\b.*(?:no such file|not found|existence)|no such file|not found/i
     .test(connectionErrorMessage(error));
 }
+
+/** A path exists but cannot be listed because it is a file, not a directory. */
+export function isRemoteNotDirectoryError(error: unknown): boolean {
+  const message = connectionErrorMessage(error);
+  if (/\b(?:permission|access) denied\b|\b(?:operation )?not permitted\b|\bunauthori[sz]ed\b|\bforbidden\b|\binsufficient privileges?\b/i.test(message)) {
+    return false;
+  }
+
+  return /\benotdir\b|\bnot (?:a )?directory\b/i.test(message)
+    || /\b(?:failed to|unable to|cannot|can't|could not) change (?:working )?directory\b|\b(?:change (?:working )?directory|cwd) failed\b/i.test(message);
+}

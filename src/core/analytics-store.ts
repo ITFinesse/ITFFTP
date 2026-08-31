@@ -20,6 +20,24 @@ interface AnalyticsProject {
 
 interface AnalyticsFile { projects: AnalyticsProject[]; }
 
+function isAnalyticsRecord(value: unknown): value is AnalyticsRecord {
+  if (!value || typeof value !== 'object') {return false;}
+  const record = value as Partial<AnalyticsRecord>;
+  return typeof record.completedAt === 'string'
+    && (record.direction === 'upload' || record.direction === 'download')
+    && typeof record.size === 'number'
+    && typeof record.durationMs === 'number';
+}
+
+function isAnalyticsProject(value: unknown): value is AnalyticsProject {
+  if (!value || typeof value !== 'object') {return false;}
+  const project = value as Partial<AnalyticsProject>;
+  return typeof project.id === 'string'
+    && typeof project.name === 'string'
+    && Array.isArray(project.records)
+    && project.records.every(isAnalyticsRecord);
+}
+
 export type WorkspaceAnalytics = TransferAnalytics & {
   projects: Array<{ id: string; name: string }>;
 };
@@ -91,8 +109,10 @@ export class AnalyticsStore extends EventEmitter implements vscode.Disposable {
   private async load(): Promise<void> {
     try {
       const bytes = await vscode.workspace.fs.readFile(this.fileUri);
-      const parsed = JSON.parse(new TextDecoder().decode(bytes));
-      if (Array.isArray(parsed?.projects)) {this.data = { projects: parsed.projects.filter((project: any) => project && typeof project.id === 'string' && Array.isArray(project.records)) };}
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+      if (parsed && typeof parsed === 'object' && 'projects' in parsed && Array.isArray(parsed.projects)) {
+        this.data = { projects: parsed.projects.filter(isAnalyticsProject) };
+      }
     } catch {
       // The first run has no file yet; create it only after a completed transfer.
     }

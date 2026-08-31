@@ -4,13 +4,22 @@ import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { webMasterTools } from '../webmaster/tools';
 import { statusBar } from '../utils/status-bar';
+import { errorMessage } from '../utils/helpers';
 import { getWorkspaceRoot } from './utils';
 import { CompareViewProvider } from '../providers/compare-view';
+import type { BaseConnection } from '../core/connection';
+import type { FileEntry, FTPConfig } from '../types';
+
+interface RemoteCommandItem {
+  entry: FileEntry;
+  config?: FTPConfig;
+  connectionRef?: BaseConnection;
+}
 
 export function registerWebMasterCommands(): vscode.Disposable[] {
   const disposables: vscode.Disposable[] = [];
 
-  const chmodCommand = vscode.commands.registerCommand('stackerftp.webmaster.chmod', async (item: any) => {
+  const chmodCommand = vscode.commands.registerCommand('stackerftp.webmaster.chmod', async (item: RemoteCommandItem) => {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {return;}
 
@@ -20,12 +29,12 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     try {
       const connection = await connectionManager.ensureConnection(config);
       await webMasterTools.showChmodDialog(connection, item.entry);
-    } catch (error: any) {
-      statusBar.error(`chmod failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`chmod failed: ${errorMessage(error)}`);
     }
   });
 
-  const checksumCommand = vscode.commands.registerCommand('stackerftp.webmaster.checksum', async (item: any) => {
+  const checksumCommand = vscode.commands.registerCommand('stackerftp.webmaster.checksum', async (item: RemoteCommandItem) => {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {return;}
 
@@ -43,12 +52,12 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
 
       const checksum = await webMasterTools.calculateRemoteChecksum(connection, item.entry.path, algorithm);
       await webMasterTools.showChecksumResult({ algorithm, remote: checksum }, item.entry.name);
-    } catch (error: any) {
-      statusBar.error(`Checksum failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Checksum failed: ${errorMessage(error)}`);
     }
   });
 
-  const compareChecksumCommand = vscode.commands.registerCommand('stackerftp.webmaster.compareChecksum', async (item: any) => {
+  const compareChecksumCommand = vscode.commands.registerCommand('stackerftp.webmaster.compareChecksum', async (item?: RemoteCommandItem) => {
     if (!item?.entry || item.entry.type !== 'file') {
       statusBar.error('Select a remote file to compare');
       return;
@@ -73,12 +82,12 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       const connection = item.connectionRef || await connectionManager.ensureConnection(config);
       const result = await webMasterTools.compareChecksums(connection, localPick[0].fsPath, item.entry.path, 'md5');
       await webMasterTools.showChecksumResult(result, item.entry.name);
-    } catch (error: any) {
-      statusBar.error(`Checksum compare failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Checksum compare failed: ${errorMessage(error)}`);
     }
   });
 
-  const fileInfoCommand = vscode.commands.registerCommand('stackerftp.webmaster.fileInfo', async (item: any) => {
+  const fileInfoCommand = vscode.commands.registerCommand('stackerftp.webmaster.fileInfo', async (item: RemoteCommandItem) => {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {return;}
 
@@ -89,8 +98,8 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       const connection = await connectionManager.ensureConnection(config);
       const info = await webMasterTools.getFileInfo(connection, item.entry);
       await webMasterTools.showFileInfo(info);
-    } catch (error: any) {
-      statusBar.error(`Failed to get file info: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Failed to get file info: ${errorMessage(error)}`);
     }
   });
 
@@ -112,13 +121,13 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       const connection = await connectionManager.ensureConnection(config);
       const results = await webMasterTools.searchInRemoteFiles(connection, config.remotePath, pattern);
       await webMasterTools.showSearchResults(results, config);
-    } catch (error: any) {
-      statusBar.error(`Search failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Search failed: ${errorMessage(error)}`);
     }
   });
 
   // Quick Search - Opens in new panel
-  const quickSearchCommand = vscode.commands.registerCommand('stackerftp.webmaster.quickSearch', async (item?: any) => {
+  const quickSearchCommand = vscode.commands.registerCommand('stackerftp.webmaster.quickSearch', async (item?: RemoteCommandItem) => {
     // Import the panel here to avoid circular dependencies
     const { QuickSearchPanel } = await import('../providers/quick-search-panel');
 
@@ -133,7 +142,7 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     await QuickSearchPanel.changePathFromCommand();
   });
 
-  const backupCommand = vscode.commands.registerCommand('stackerftp.webmaster.backup', async (item: any) => {
+  const backupCommand = vscode.commands.registerCommand('stackerftp.webmaster.backup', async (item?: RemoteCommandItem) => {
     if (!item?.entry) {
       statusBar.error('No file or folder selected');
       return;
@@ -166,8 +175,8 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       const connection = item.connectionRef || await connectionManager.ensureConnection(config);
       const backupPath = await webMasterTools.createBackup(connection, item.entry.path, backupName || undefined);
       statusBar.success(`Backup created: ${backupPath}`);
-    } catch (error: any) {
-      statusBar.error(`Backup failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Backup failed: ${errorMessage(error)}`);
     }
   });
 
@@ -219,8 +228,8 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
       }
 
       await compareViewProvider.show(localPath);
-    } catch (error: any) {
-      statusBar.error(`Folder comparison failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Folder comparison failed: ${errorMessage(error)}`);
     }
   });
 
@@ -234,8 +243,8 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     try {
       const connection = await connectionManager.ensureConnection(config);
       await webMasterTools.showFindAndReplaceDialog(connection, config.remotePath);
-    } catch (error: any) {
-      statusBar.error(`Find and replace failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Find and replace failed: ${errorMessage(error)}`);
     }
   });
 
@@ -257,8 +266,8 @@ export function registerWebMasterCommands(): vscode.Disposable[] {
     try {
       const connection = await connectionManager.ensureConnection(config);
       await webMasterTools.purgeRemoteCache(connection, config.remotePath);
-    } catch (error: any) {
-      statusBar.error(`Purge cache failed: ${error.message}`);
+    } catch (error) {
+      statusBar.error(`Purge cache failed: ${errorMessage(error)}`);
     }
   });
 

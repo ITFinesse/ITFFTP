@@ -9,68 +9,82 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { RemoteExplorerTreeProvider } from './providers/remote-explorer-tree';
-import { ConnectionFormProvider } from './providers/connection-form-provider';
 import { RemoteDocumentProvider } from './providers/remote-document-provider';
 import { configManager } from './core/config';
 import { connectionManager } from './core/connection-manager';
 import { transferManager } from './core/transfer-manager';
+import { isTransferCompleted, skippedTransferMessage } from './core/transfer-outcome';
 import { logger } from './utils/logger';
 import { statusBar } from './utils/status-bar';
 import { registerCommands } from './commands';
 import { fileWatcherManager, WatchedChange } from './core/file-watcher';
-import { DEFAULT_IGNORE_PATTERNS, isPathIgnored, resolveLocalRoot } from './utils/helpers';
-import { TransferQueueTreeProvider } from './providers/transfer-queue-tree';
+import { DEFAULT_IGNORE_PATTERNS, errorCode, errorMessage, isPathIgnored, resolveLocalRoot } from './utils/helpers';
 import { SettingsPanel } from './providers/settings-panel';
 import { DashboardLauncherProvider } from './providers/dashboard-launcher';
 import { AnalyticsStore } from './core/analytics-store';
-import { FTPConfig } from './types';
-import { isWatcherWriteSuppressed, suppressWatcherWrite } from './core/watcher-suppression';
+import { FileEntry, FTPConfig, TransferItem } from './types';
 
 let remoteTreeProvider: RemoteExplorerTreeProvider;
-let connectionFormProvider: ConnectionFormProvider;
 let remoteDocumentProvider: RemoteDocumentProvider;
 let settingsPanelProvider: SettingsPanel;
+let remoteExplorerRefreshTimer: NodeJS.Timeout | undefined;
 
 import { ProviderContainer } from './commands/index';
 
 const providerContainer: ProviderContainer = {
   remoteExplorer: undefined,
-  connectionFormProvider: undefined,
-  settingsPanel: undefined,
-  treeView: undefined
+  settingsPanel: undefined
 };
+
+interface RemoteCommandItem {
+  entry: FileEntry;
+  config?: FTPConfig;
+}
+
+interface EditMapping {
+  remotePath: string;
+  config: FTPConfig;
+}
+
+function getEditMappings(): Map<string, EditMapping> | undefined {
+  return (global as { stackerftpEditMappings?: Map<string, EditMapping> }).stackerftpEditMappings;
+}
 
 // Session-based auto-upload confirmation state
 // Session-based auto-upload confirmation state (per host)
 const autoUploadConfirmedHosts: Set<string> = new Set();
 
-// Track recently uploaded files to prevent duplicate uploads
-// when both uploadOnSave and watcher.autoUpload are enabled
 const AUTO_CONNECT_DELAY_MS = 1500;
 const AUTO_CONNECT_RETRY_DELAY_MS = 3000;
 const MAX_AUTO_CONNECT_RETRIES = 1;
 const autoConnectTimers: Map<string, NodeJS.Timeout> = new Map();
 const autoConnectRetries: Map<string, number> = new Map();
 
-/**
- * Mark a file as recently uploaded to prevent duplicate uploads
- */
-export function markFileAsUploaded(filePath: string): void {
-  suppressWatcherWrite(filePath, 3000);
-}
-
-/**
- * Check if a file was recently uploaded (within tracking duration)
- */
-export function wasRecentlyUploaded(filePath: string): boolean {
-  return isWatcherWriteSuppressed(filePath);
+function scheduleRemoteExplorerRefresh(): void {
+  if (remoteExplorerRefreshTimer) {clearTimeout(remoteExplorerRefreshTimer);}
+  remoteExplorerRefreshTimer = setTimeout(() => {
+    remoteExplorerRefreshTimer = undefined;
+    remoteTreeProvider?.refreshAfterOperation();
+  }, 150);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   logger.info('ITFFTP activation started');
   const analyticsStore = new AnalyticsStore(context.globalStorageUri);
   context.subscriptions.push(analyticsStore);
-  transferManager.on('transferComplete', item => { void analyticsStore.record(item); });
+  const transferCompleteListener = (item: TransferItem): void => {
+    void analyticsStore.record(item);
+    if (item.status === 'completed') {
+      if (item.config) {
+        fileWatcherManager.markTransferCompleted(item.config, item.localPath, item.remotePath);
+      }
+      if (item.direction === 'upload') {scheduleRemoteExplorerRefresh();}
+    }
+  };
+  transferManager.on('transferComplete', transferCompleteListener);
+  context.subscriptions.push({
+    dispose: () => transferManager.removeListener('transferComplete', transferCompleteListener)
+  });
   // 1. Fundamental Command Registration (Always available)
   context.subscriptions.push(
     vscode.commands.registerCommand('stackerftp.showOutput', () => {
@@ -79,11 +93,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   // 2. Register Global Providers
-  connectionFormProvider = new ConnectionFormProvider(context.extensionUri);
-  providerContainer.connectionFormProvider = connectionFormProvider;
   const settingsPanel = new SettingsPanel(context.extensionUri, async scope => {
     await configManager.loadConfig(scope.fsPath);
-    connectionFormProvider?.refresh();
     remoteTreeProvider?.refresh();
     await startFileWatcher(scope.fsPath);
     scheduleAutoConnect(scope.fsPath);
@@ -108,18 +119,35 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // 3. Register All Feature Commands (before early exit)
-  registerCommands(context, providerContainer);
-
-  // 4. Workspace Check & Feature-specific Initialization
+  // 3. Resolve workspace-owned providers before command registration. The
+  // command module captures provider references when it registers handlers, so
+  // registering first permanently leaves Remote Explorer commands undefined.
   const workspaceFolders = vscode.workspace.workspaceFolders;
+  const workspaceRoot = workspaceFolders?.[0]?.uri.fsPath;
+
+  if (workspaceRoot) {
+    remoteDocumentProvider = new RemoteDocumentProvider();
+    context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider(
+        RemoteDocumentProvider.scheme,
+        remoteDocumentProvider
+      )
+    );
+
+    remoteTreeProvider = new RemoteExplorerTreeProvider(workspaceRoot);
+    providerContainer.remoteExplorer = remoteTreeProvider;
+    context.subscriptions.push(remoteTreeProvider);
+  }
+
+  // 4. Register All Feature Commands (before the no-workspace early exit).
+  registerCommands(context, providerContainer);
 
   if (!workspaceFolders || workspaceFolders.length === 0) {
     logger.info('No workspace folder open, features will activate on folder open.');
 
     // Show welcome message
     vscode.window.showInformationMessage(
-      'ITFFTP: Please open a folder to start using SFTP features.',
+      'ITFFTP: Please open a folder to start using ITFFTP features.',
       'Open Folder'
     ).then(selection => {
       if (selection === 'Open Folder') {
@@ -130,27 +158,15 @@ export function activate(context: vscode.ExtensionContext): void {
     return;
   }
 
-  const workspaceRoot = workspaceFolders[0].uri.fsPath;
-
-  // 5. Remote Explorer & File System Providers
-  remoteDocumentProvider = new RemoteDocumentProvider();
-  context.subscriptions.push(
-    vscode.workspace.registerTextDocumentContentProvider(
-      RemoteDocumentProvider.scheme,
-      remoteDocumentProvider
-    )
-  );
-
-  // 6. Native TreeView Setup
-  remoteTreeProvider = new RemoteExplorerTreeProvider(workspaceRoot);
-  providerContainer.remoteExplorer = remoteTreeProvider;
+  // The guarded initialization above proves this before the early exit.
+  const activeWorkspaceRoot = workspaceRoot!;
 
   // The dashboard is the only ITFFTP surface. Keep the provider available to
   // transfer commands, but do not create a classic explorer side-panel view.
 
-  // 7. Register viewContent command
+  // 5. Register viewContent command
   context.subscriptions.push(
-    vscode.commands.registerCommand('stackerftp.viewContent', async (item?: any) => {
+    vscode.commands.registerCommand('stackerftp.viewContent', async (item?: RemoteCommandItem) => {
       if (!item || !item.entry) {
         statusBar.error('No file selected');
         return;
@@ -183,46 +199,42 @@ export function activate(context: vscode.ExtensionContext): void {
         const uri = RemoteDocumentProvider.createUri(remotePath);
         const doc = await vscode.workspace.openTextDocument(uri);
         await vscode.window.showTextDocument(doc, { preview: true });
-      } catch (error: any) {
-        statusBar.error(`Failed to open file: ${error.message}`);
+      } catch (error) {
+        statusBar.error(`Failed to open file: ${errorMessage(error)}`);
       }
     })
   );
 
-  // 8. Transfer Queue & File Watcher
-  const transferQueueProvider = new TransferQueueTreeProvider();
-  context.subscriptions.push(transferQueueProvider);
-
-  transferManager.on('queueUpdate', () => {
-    const activeCount = transferManager.getActiveCount();
-    statusBar.updateTransferCount(activeCount);
-    // UI Update: Badge on Activity Bar
-    if (transferQueueProvider) {
-      transferQueueProvider.updateBadge(activeCount);
+  // 6. Transfer status & File Watcher. The native queue TreeView is retired;
+  // retain only the status count and dispose both EventEmitter listeners.
+  const transferQueueUpdateListener = (): void => {
+    statusBar.updateTransferCount(transferManager.getActiveCount());
+  };
+  const transferQueueCompleteListener = (): void => statusBar.updateTransferCount(0);
+  transferManager.on('queueUpdate', transferQueueUpdateListener);
+  transferManager.on('queueComplete', transferQueueCompleteListener);
+  context.subscriptions.push({
+    dispose: () => {
+      transferManager.removeListener('queueUpdate', transferQueueUpdateListener);
+      transferManager.removeListener('queueComplete', transferQueueCompleteListener);
     }
   });
 
-  transferManager.on('queueComplete', () => {
-    statusBar.updateTransferCount(0);
-    if (transferQueueProvider) {
-      transferQueueProvider.updateBadge(0);
-    }
-  });
+  // 7. Startup Tasks
+  // Load every workspace config before starting its independently-owned watcher.
+  settingsPanel.initialize(vscode.Uri.file(activeWorkspaceRoot));
+  for (const folder of workspaceFolders) {
+    void loadConfiguration(folder.uri.fsPath).then(() => startFileWatcher(folder.uri.fsPath));
+  }
 
-  // 9. Startup Tasks
-  // Load the config before starting the watcher or scheduling auto-connect.
-  void loadConfiguration(workspaceRoot).then(() => {
-    settingsPanel.initialize(vscode.Uri.file(workspaceRoot));
-    return startFileWatcher(workspaceRoot);
-  });
-
-  // 10. Event Listeners (Workspace changes, Save)
+  // 8. Event Listeners (Workspace changes, Save)
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(async event => {
       for (const removed of event.removed) {
         clearAutoConnectTimer(removed.uri.fsPath);
-        fileWatcherManager.stopAll();
-        await connectionManager.disconnect();
+        const removedConfig = configManager.getActiveConfig(removed.uri.fsPath);
+        fileWatcherManager.stopWatcher(removed.uri.fsPath);
+        if (removedConfig) {await connectionManager.disconnect(removedConfig);}
       }
       for (const added of event.added) {
         await loadConfiguration(added.uri.fsPath);
@@ -230,31 +242,44 @@ export function activate(context: vscode.ExtensionContext): void {
         await startFileWatcher(added.uri.fsPath);
       }
     }),
+    vscode.workspace.onDidChangeConfiguration(async event => {
+      for (const folder of vscode.workspace.workspaceFolders || []) {
+        if (event.affectsConfiguration('stackerftp.enableFileWatcher', folder.uri)) {
+          await startFileWatcher(folder.uri.fsPath);
+        }
+      }
+    }),
     vscode.workspace.onDidSaveTextDocument(async document => {
-      const configPath = path.join(workspaceRoot, '.vscode', 'sftp.json');
-      if (document.fileName === configPath) {
-        await loadConfiguration(workspaceRoot);
-        if (connectionFormProvider) {connectionFormProvider.refresh();}
+      const documentScope = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath || activeWorkspaceRoot;
+      const configPath = path.join(documentScope, '.vscode', 'sftp.json');
+      if (normalizeLocalPath(document.fileName) === normalizeLocalPath(configPath)) {
+        await loadConfiguration(documentScope);
+        remoteTreeProvider?.refresh();
+        await startFileWatcher(documentScope);
         statusBar.success('Configuration reloaded');
         return;
       }
 
       // Handle Edit Local
-      const editMappings = (global as any).stackerftpEditMappings;
+      const editMappings = getEditMappings();
       if (editMappings && editMappings.has(document.fileName)) {
         const metadata = editMappings.get(document.fileName);
-        if (!connectionManager.isConnected(metadata.config)) {return;}
+        if (!metadata || !connectionManager.isConnected(metadata.config)) {return;}
         try {
           const connection = connectionManager.getConnection(metadata.config)!;
-          await transferManager.uploadFile(connection, document.fileName, metadata.remotePath, metadata.config);
-          statusBar.success(`Uploaded: ${path.basename(metadata.remotePath)}`);
-        } catch (error: any) {
-          statusBar.error(`Failed to upload: ${error.message}`, true);
+          const outcome = await transferManager.uploadFile(connection, document.fileName, metadata.remotePath, metadata.config);
+          if (isTransferCompleted(outcome)) {
+            statusBar.success(`Uploaded: ${path.basename(metadata.remotePath)}`);
+          } else {
+            void vscode.window.showWarningMessage(skippedTransferMessage('Upload', metadata.remotePath, outcome));
+          }
+        } catch (error) {
+          statusBar.error(`Failed to upload: ${errorMessage(error)}`, true);
         }
         return;
       }
 
-      handleFileSave(document, workspaceRoot);
+      handleFileSave(document, documentScope);
     })
   );
 
@@ -351,10 +376,9 @@ async function autoConnectConfiguredServer(workspaceRoot: string): Promise<void>
     settingsPanelProvider?.scheduleBackgroundRefresh(config);
     autoConnectRetries.delete(workspaceRoot);
     remoteTreeProvider?.refresh();
-    connectionFormProvider?.refresh();
-  } catch (error: any) {
+  } catch (error) {
     logger.error(`Auto-connect failed for ${config.host}`, error);
-    statusBar.error(`Auto-connect failed: ${error.message || error}`, true);
+    statusBar.error(`Auto-connect failed: ${errorMessage(error)}`, true);
     const attempts = autoConnectRetries.get(workspaceRoot) || 0;
     if (configuration.get<boolean>('autoReconnect', true) && attempts < MAX_AUTO_CONNECT_RETRIES) {
       autoConnectRetries.set(workspaceRoot, attempts + 1);
@@ -392,7 +416,7 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
     return;
   }
 
-  // Check for active connection FIRST - before showing any dialog
+  // Check for active connection FIRST - before showing a dialog
   if (!connectionManager.isConnected(config)) {
     logger.debug(`No active connection for ${config.name || config.host}, skipping auto-upload`);
     return;
@@ -430,22 +454,25 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
     const remoteDir = path.dirname(remotePath);
     try {
       await connection.mkdir(remoteDir);
-    } catch (error: any) {
+    } catch (error) {
       // Directory might already exist
-      if (error.code !== 'EEXIST' && !error.message?.includes('exists')) {
+      const code = errorCode(error);
+      const message = errorMessage(error, '');
+      if (code !== 'EEXIST' && !message.includes('exists')) {
         logger.warn(`Failed to create directory: ${remoteDir}`, error);
         // Permission hatası varsa bildir
-        if (error.code === 'EACCES' || error.code === 'EPERM' ||
-          error.message?.includes('permission') || error.message?.includes('Permission')) {
+        if (code === 'EACCES' || code === 'EPERM' ||
+          message.includes('permission') || message.includes('Permission')) {
           throw new Error(`Permission denied creating directory: ${remoteDir}`);
         }
       }
     }
 
-    await transferManager.uploadFile(connection, document.fileName, remotePath, config);
-
-    // Mark as recently uploaded to prevent duplicate from file watcher
-    markFileAsUploaded(document.fileName);
+    const outcome = await transferManager.uploadFile(connection, document.fileName, remotePath, config);
+    if (!isTransferCompleted(outcome)) {
+      void vscode.window.showWarningMessage(skippedTransferMessage('Auto-upload', document.fileName, outcome));
+      return;
+    }
 
     vscode.window.setStatusBarMessage(`$(cloud-upload) Uploaded: ${path.basename(document.fileName)}`, 3000);
     logger.info(`Auto-uploaded: ${relativePath}`);
@@ -457,22 +484,31 @@ async function handleFileSave(document: vscode.TextDocument, workspaceRoot: stri
 
 async function startFileWatcher(workspaceRoot: string): Promise<void> {
   const config = configManager.getActiveConfig(workspaceRoot);
-  if (!config) {return;}
-  const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
-  const key = `${localRoot}-${config.host}`;
-  const enabled = vscode.workspace.getConfiguration('stackerftp', vscode.Uri.file(workspaceRoot)).get<boolean>('enableFileWatcher', false);
-  if (!enabled) {
-    fileWatcherManager.stopWatcher(key);
+  if (!config) {
+    fileWatcherManager.stopWatcher(workspaceRoot);
     return;
   }
-  const watcherConfig: FTPConfig = (config.watcher || !config.uploadOnSave) ? config : {
-    ...config,
-    watcher: { files: '**/*', autoUpload: true, autoDelete: false }
-  };
-  fileWatcherManager.startWatcher(localRoot, watcherConfig, async (change: WatchedChange) => {
-    await settingsPanelProvider?.refreshWatchedPath(config, change.path);
-    if (change.side === 'remote') {remoteTreeProvider?.refresh();}
-  });
+  const enabled = vscode.workspace.getConfiguration('stackerftp', vscode.Uri.file(workspaceRoot)).get<boolean>('enableFileWatcher', false);
+  if (!enabled) {
+    fileWatcherManager.stopWatcher(workspaceRoot);
+    return;
+  }
+  const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+  fileWatcherManager.startWatcher(workspaceRoot, localRoot, config, async (change: WatchedChange) => {
+    await settingsPanelProvider?.refreshWatchedPath(
+      config,
+      change.path,
+      change.remoteMutated === true,
+      change.kind,
+      change.completedDirection
+    );
+    if (change.side === 'remote' || change.remoteMutated) {scheduleRemoteExplorerRefresh();}
+  }, relativePath => settingsPanelProvider?.canAutoDownload(config, relativePath) ?? true);
+}
+
+function normalizeLocalPath(localPath: string): string {
+  const resolved = path.resolve(localPath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 export function deactivate(): void {
@@ -482,6 +518,9 @@ export function deactivate(): void {
     clearTimeout(timer);
   }
   autoConnectTimers.clear();
+
+  if (remoteExplorerRefreshTimer) {clearTimeout(remoteExplorerRefreshTimer);}
+  remoteExplorerRefreshTimer = undefined;
 
   fileWatcherManager.stopAll();
 
@@ -502,9 +541,7 @@ export function deactivate(): void {
   }
 
   // Clear edit mappings
-  if ((global as any).stackerftpEditMappings) {
-    (global as any).stackerftpEditMappings.clear();
-  }
+  getEditMappings()?.clear();
 
   statusBar.dispose();
   logger.dispose();

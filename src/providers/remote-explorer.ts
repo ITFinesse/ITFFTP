@@ -10,7 +10,7 @@ import { BaseConnection } from '../core/connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { statusBar } from '../utils/status-bar';
-import { sortFileEntries } from '../utils/helpers';
+import { errorMessage, sortFileEntries } from '../utils/helpers';
 
 export class RemoteExplorerProvider implements vscode.TreeDataProvider<RemoteFileItem | RemoteConfigItem | RemoteMessageItem>, vscode.Disposable {
   private _onDidChangeTreeData: vscode.EventEmitter<RemoteFileItem | RemoteConfigItem | RemoteMessageItem | undefined | null | void> = new vscode.EventEmitter();
@@ -47,7 +47,7 @@ export class RemoteExplorerProvider implements vscode.TreeDataProvider<RemoteFil
     const configs = configManager.getConfigs(this.workspaceRoot);
     
     if (configs.length === 0) {
-      return [new RemoteMessageItem('No SFTP configuration found. Run "SFTP: Config" to create one.', 'info')];
+      return [new RemoteMessageItem('No ITFFTP configuration found. Run "ITFFTP: Config" to create one.', 'info')];
     }
 
     // Root level - show configurations
@@ -130,7 +130,7 @@ export class RemoteExplorerProvider implements vscode.TreeDataProvider<RemoteFil
     const config = configManager.getActiveConfig(this.workspaceRoot);
     if (!config) {
       const choice = await vscode.window.showWarningMessage(
-        'No SFTP configuration found.',
+        'No ITFFTP configuration found.',
         'Create Config'
       );
       if (choice === 'Create Config') {
@@ -142,8 +142,8 @@ export class RemoteExplorerProvider implements vscode.TreeDataProvider<RemoteFil
     try {
       await this.ensureConnection(config);
       this.refresh();
-    } catch (error: any) {
-      statusBar.error(`Failed to connect: ${error.message}`);
+    } catch (error: unknown) {
+      statusBar.error(`Failed to connect: ${errorMessage(error)}`);
     }
   }
 

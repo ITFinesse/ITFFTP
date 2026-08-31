@@ -7,12 +7,31 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as os from 'os';
 import { Client } from 'basic-ftp';
-import { BaseConnection } from './connection';
+import {
+  BaseConnection,
+  assertTransferredFile,
+  atomicDownloadToLocalFile,
+  modificationTimesMatch,
+  TransferSerializationOptions,
+  uniqueRemoteSiblingPath,
+  withSerializedLocalWrite,
+  withSerializedRemoteWrite
+} from './connection';
 import { FileEntry, FTPConfig } from '../types';
 import { logger } from '../utils/logger';
 import { isRemoteMissingError } from './connection-errors';
-import { normalizeRemotePath } from '../utils/helpers';
+import { errorCode, normalizeRemotePath } from '../utils/helpers';
 import { isConnectionClosedError } from './connection-errors';
+
+function isFtpMissingPathError(error: unknown): boolean {
+  return /\b(?:550|553)\b.*(?:no such file|not found|does not exist|cannot find|can't find)/i
+    .test(String((error as Error)?.message || error));
+}
+
+function isFtpTimestampUnsupported(error: unknown): boolean {
+  return /\b(?:500|501|502|504)\b|not implemented|not supported|unknown command/i
+    .test(String((error as Error)?.message || error));
+}
 
 export class FTPConnection extends BaseConnection {
   private client: Client;
@@ -38,7 +57,9 @@ export class FTPConnection extends BaseConnection {
 
   async connect(): Promise<void> {
     try {
-      const secure = this.config.secure === true || this.config.secure === 'implicit';
+      const secure = this.config.secure === 'implicit'
+        ? 'implicit'
+        : this.config.secure === true || this.config.secure === 'control';
 
       await this.client.access({
         host: this.config.host,
@@ -70,6 +91,7 @@ export class FTPConnection extends BaseConnection {
     this.client.close();
     this._connected = false;
     this.emit('disconnected');
+    await super.disconnect();
   }
 
   private startKeepalive(): void {
@@ -187,8 +209,11 @@ export class FTPConnection extends BaseConnection {
     }
   }
 
-  async download(remotePath: string, localPath: string): Promise<void> {
-    return this.enqueue(() => this._download(remotePath, localPath));
+  async download(remotePath: string, localPath: string, serialization?: TransferSerializationOptions): Promise<void> {
+    const operation = () => this.enqueue(() => this._download(remotePath, localPath));
+    return serialization?.writeLockHeld
+      ? operation()
+      : withSerializedLocalWrite(localPath, operation);
   }
 
   private async _download(remotePath: string, localPath: string): Promise<void> {
@@ -196,21 +221,11 @@ export class FTPConnection extends BaseConnection {
       this.emit('transferStart', { direction: 'download', remotePath, localPath });
       this.client.trackProgress(info => this.emitProgress(remotePath, info.bytes, 0));
 
-      // Ensure directory exists
-      const localDir = path.dirname(localPath);
-      await fs.promises.mkdir(localDir, { recursive: true });
-
-      // EISDIR safety: check if local path is already a directory
-      try {
-        const stats = await fs.promises.stat(localPath);
-        if (stats.isDirectory()) {
-          throw new Error(`Cannot download to ${localPath}: a directory exists at this path.`);
-        }
-      } catch (e: any) {
-        if (e.code !== 'ENOENT') {throw e;}
-      }
-
-      await this.client.downloadTo(localPath, remotePath);
+      const source = await this._stat(remotePath);
+      assertTransferredFile(source, source?.size ?? -1, `Remote download source ${remotePath}`);
+      await atomicDownloadToLocalFile(localPath, source.size, source.modifyTime, async stagingPath => {
+        await this.client.downloadTo(stagingPath, remotePath);
+      });
 
       this.emit('transferComplete', { direction: 'download', remotePath, localPath });
     } catch (error) {
@@ -243,33 +258,96 @@ export class FTPConnection extends BaseConnection {
     }
   }
 
-  async upload(localPath: string, remotePath: string): Promise<void> {
-    return this.enqueue(() => this._upload(localPath, remotePath));
+  async upload(localPath: string, remotePath: string, serialization?: TransferSerializationOptions): Promise<void> {
+    const operation = () => this.enqueue(() => this._upload(localPath, remotePath));
+    return serialization?.writeLockHeld
+      ? operation()
+      : withSerializedRemoteWrite(this.config, remotePath, operation);
   }
 
   private async _upload(localPath: string, remotePath: string): Promise<void> {
+    const stagingPath = uniqueRemoteSiblingPath(remotePath, 'upload');
+    const backupPath = uniqueRemoteSiblingPath(remotePath, 'backup');
+    let promoted = false;
+    let backupCreated = false;
+    let verified = false;
     try {
       this.emit('transferStart', { direction: 'upload', localPath, remotePath });
       this.client.trackProgress(info => this.emitProgress(localPath, info.bytes, 0));
+      const source = await fs.promises.stat(localPath);
+      if (!source.isFile()) {throw new Error(`Cannot upload non-file source: ${localPath}`);}
       const startedAt = Date.now();
       logger.info(`FTP upload started: ${remotePath}`);
       try {
-        await this.client.uploadFrom(localPath, remotePath);
+        await this.client.uploadFrom(localPath, stagingPath);
       } catch (error) {
         if (!isRemoteMissingError(error)) {throw error;}
         const parentDir = path.dirname(remotePath);
         if (!parentDir || parentDir === '.' || parentDir === '/') {throw error;}
         logger.info(`FTP upload parent is missing; creating ${parentDir} and retrying once`);
         await this.ensureRemoteDir(parentDir);
-        await this.client.uploadFrom(localPath, remotePath);
+        await this.client.uploadFrom(localPath, stagingPath);
       }
+
+      const staged = await this._stat(stagingPath);
+      assertTransferredFile(staged, source.size, `Remote upload staging file ${stagingPath}`);
+      const targetBefore = await this._stat(remotePath);
+      try {
+        await this.client.rename(stagingPath, remotePath);
+        promoted = true;
+      } catch (directRenameError) {
+        if (!targetBefore) {throw directRenameError;}
+        await this.client.rename(remotePath, backupPath);
+        backupCreated = true;
+        try {
+          await this.client.rename(stagingPath, remotePath);
+          promoted = true;
+        } catch (promotionError) {
+          try {
+            await this.client.rename(backupPath, remotePath);
+            backupCreated = false;
+          } catch (rollbackError) {
+            throw Object.assign(
+              new Error(`FTP upload promotion and rollback failed for ${remotePath}; previous data remains at ${backupPath}`),
+              { promotionError, rollbackError }
+            );
+          }
+          throw promotionError;
+        }
+      }
+
+      assertTransferredFile(await this._stat(remotePath), source.size, `Remote upload target ${remotePath}`);
+      verified = true;
       logger.info(`FTP upload data complete: ${remotePath}; ${Date.now() - startedAt}ms`);
       this.emit('transferComplete', { direction: 'upload', localPath, remotePath });
     } catch (error) {
+      if (backupCreated && promoted && !verified) {
+        try {
+          await this.client.rename(remotePath, stagingPath);
+          promoted = false;
+          await this.client.rename(backupPath, remotePath);
+          backupCreated = false;
+        } catch (rollbackError) {
+          throw Object.assign(
+            new Error(`FTP upload verification and rollback failed for ${remotePath}; previous data remains at ${backupPath}`),
+            { uploadError: error, rollbackError }
+          );
+        }
+      }
       logger.error('FTP upload error', error);
       throw error;
     } finally {
       this.client.trackProgress();
+      if (!promoted) {
+        try {await this.client.remove(stagingPath);}
+        catch (cleanupError) {
+          if (!isFtpMissingPathError(cleanupError)) {logger.warn(`Failed to clean FTP upload staging file ${stagingPath}`, cleanupError);}
+        }
+      }
+      if (backupCreated && verified) {
+        try {await this.client.remove(backupPath);}
+        catch (cleanupError) {logger.warn(`Failed to clean FTP upload backup ${backupPath}`, cleanupError);}
+      }
     }
   }
 
@@ -279,10 +357,25 @@ export class FTPConnection extends BaseConnection {
       try {
         // MFMT is supported by common FTP servers and uses UTC YYYYMMDDHHMMSS.
         await this.client.send(`MFMT ${stamp} ${remotePath}`);
+        try {
+          const observed = await this.client.lastMod(remotePath);
+          if (!modificationTimesMatch(observed, modifyTime)) {
+            throw new Error(`FTP timestamp verification failed for ${remotePath}`);
+          }
+        } catch (error) {
+          if (isFtpTimestampUnsupported(error)) {
+            logger.debug(`FTP server cannot read back timestamps for ${remotePath}`, error);
+            return false;
+          }
+          throw error;
+        }
         return true;
       } catch (error) {
-        logger.debug(`FTP server does not support preserving timestamps for ${remotePath}`, error);
-        return false;
+        if (isFtpTimestampUnsupported(error)) {
+          logger.debug(`FTP server does not support preserving timestamps for ${remotePath}`, error);
+          return false;
+        }
+        throw error;
       }
     });
   }
@@ -360,35 +453,74 @@ export class FTPConnection extends BaseConnection {
   }
 
   private async _stat(remotePath: string): Promise<FileEntry | null> {
+    let sizeError: unknown;
     try {
       const size = await this.client.size(remotePath);
       const fileName = path.basename(remotePath);
+      let modifyTime = new Date(0);
+      try {
+        modifyTime = await this.client.lastMod(remotePath);
+      } catch (error) {
+        if (isConnectionClosedError(error)) {throw error;}
+        logger.debug(`FTP modification time is unavailable for ${remotePath}`, error);
+      }
 
       return {
         name: fileName,
         type: 'file',
         size,
-        modifyTime: new Date(),
+        modifyTime,
         rights: { user: '', group: '', other: '' },
         path: remotePath
       };
-    } catch {
-      const originalDir = await this.client.pwd();
-      try {
-        await this.client.cd(remotePath);
-        return {
-          name: path.basename(remotePath),
-          type: 'directory',
-          size: 0,
-          modifyTime: new Date(),
-          rights: { user: '', group: '', other: '' },
-          path: remotePath
-        };
-      } catch {
+    } catch (error) {
+      if (isConnectionClosedError(error)) {throw error;}
+      sizeError = error;
+    }
+
+    const originalDir = await this.client.pwd();
+    let directoryError: unknown;
+    try {
+      await this.client.cd(remotePath);
+      return {
+        name: path.basename(remotePath),
+        type: 'directory',
+        size: 0,
+        modifyTime: new Date(0),
+        rights: { user: '', group: '', other: '' },
+        path: remotePath
+      };
+    } catch (error) {
+      if (isConnectionClosedError(error)) {throw error;}
+      directoryError = error;
+    } finally {
+      await this.client.cd(originalDir);
+    }
+
+    // A successful parent listing is authoritative even on servers that do
+    // not implement SIZE. It also preserves an available LIST timestamp.
+    const parentDir = path.posix.dirname(remotePath.replace(/\\/g, '/'));
+    const basename = path.posix.basename(remotePath.replace(/\\/g, '/'));
+    try {
+      await this.client.cd(parentDir || '.');
+      const listed = (await this.client.list()).find(item => item.name === basename);
+      if (!listed) {return null;}
+      return {
+        name: listed.name,
+        type: this.mapFileType(listed.type),
+        size: listed.size || 0,
+        modifyTime: listed.modifiedAt || new Date(0),
+        rights: { user: '', group: '', other: '' },
+        path: remotePath
+      };
+    } catch (listingError) {
+      if (isConnectionClosedError(listingError)) {throw listingError;}
+      if (isFtpMissingPathError(sizeError) && isFtpMissingPathError(directoryError) && isFtpMissingPathError(listingError)) {
         return null;
-      } finally {
-        await this.client.cd(originalDir);
       }
+      throw sizeError || directoryError || listingError;
+    } finally {
+      await this.client.cd(originalDir);
     }
   }
 
@@ -415,8 +547,8 @@ export class FTPConnection extends BaseConnection {
         // Her durumda temizle
         try {
           await fs.promises.unlink(tempPath);
-        } catch (cleanupError: any) {
-          if (cleanupError?.code !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
+        } catch (cleanupError) {
+          if (errorCode(cleanupError) !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
         }
       }
     });
@@ -440,8 +572,8 @@ export class FTPConnection extends BaseConnection {
         // Her durumda temizle
         try {
           await fs.promises.unlink(tempPath);
-        } catch (cleanupError: any) {
-          if (cleanupError?.code !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
+        } catch (cleanupError) {
+          if (errorCode(cleanupError) !== 'ENOENT') {logger.warn('Failed to cleanup temp file', cleanupError);}
         }
       }
     });

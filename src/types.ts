@@ -2,6 +2,8 @@
  * ITFFTP - Type Definitions
  */
 
+import type { ConnectionOptions as TlsConnectionOptions } from 'tls';
+
 export type Protocol = 'ftp' | 'ftps' | 'sftp';
 
 export interface HopConfig {
@@ -26,6 +28,8 @@ export interface FTPConfig {
   passphrase?: string;
   remotePath: string;
   localPath?: string;
+  /** Transfer direction for file-watcher changes; independent of opening files in Remote Explorer. */
+  autoSync?: 'off' | 'upload' | 'download' | 'both';
   uploadOnSave?: boolean;
   downloadOnOpen?: boolean;
   remoteExplorerOrder?: 'name' | 'size' | 'date' | 'type';
@@ -39,16 +43,16 @@ export interface FTPConfig {
   collisionPolicy?: 'ask' | 'overwrite' | 'skip';
   ignore?: string[];
   watcher?: boolean | {
-    files: string;
-    autoUpload: boolean;
-    autoDelete: boolean;
+    files?: string;
+    autoUpload?: boolean;
+    autoDelete?: boolean;
   };
-  profiles?: { [key: string]: Partial<FTPConfig> };
+  profiles?: { [key: string]: FTPProfileOverride };
   defaultProfile?: string;
   connTimeout?: number;
   keepalive?: number;
   secure?: boolean | 'control' | 'implicit';
-  secureOptions?: any;
+  secureOptions?: TlsConnectionOptions;
   passive?: boolean;
   hop?: HopConfig | HopConfig[];
   // Remote-FS Integration: reference to a remote defined in user settings
@@ -56,9 +60,23 @@ export interface FTPConfig {
   autoReconnect?: boolean;
 }
 
+/** A named profile is applied after its base connection has been resolved, so
+ * it cannot switch to another reusable remote or recursively define profiles. */
+export type FTPProfileOverride = Partial<Omit<FTPConfig, 'profiles' | 'defaultProfile' | 'remote'>>;
+
+/** The JSON file may store a direct, fully identified connection or a partial
+ * connection that references `stackerftp.remotes`. Runtime consumers use the
+ * resolved `FTPConfig` returned by the configuration contract. */
+export type StoredFTPConfig = FTPConfig | (
+  Omit<Partial<FTPConfig>, 'remote' | 'profiles'> & {
+    remote: string;
+    profiles?: { [key: string]: FTPProfileOverride };
+  }
+);
+
 // Remote-FS Integration: Remote definition in user settings
 export interface RemoteFsConfig {
-  name: string;
+  name?: string;
   host: string;
   port?: number;
   protocol?: Protocol;
@@ -87,12 +105,27 @@ export interface FileEntry {
   isSymlinkToDirectory?: boolean; // Whether symlink points to a directory
 }
 
+export type TransferOutcome =
+  | { status: 'completed' }
+  | { status: 'skipped'; reason: string };
+
+export interface TransferRequestOptions {
+  /** Optional queue/display hints. Execution always re-stats the target. */
+  size?: number;
+  targetExists?: boolean;
+  sourceType?: 'file' | 'directory' | 'symlink';
+  targetType?: 'file' | 'directory' | 'symlink';
+  /** Explicit authorization to transactionally replace the opposing file or
+   * directory type after a fresh target stat. */
+  replaceTypeCollision?: boolean;
+}
+
 export interface TransferItem {
   id: string;
   localPath: string;
   remotePath: string;
   direction: 'upload' | 'download';
-  status: 'pending' | 'transferring' | 'completed' | 'error' | 'cancelled';
+  status: 'pending' | 'transferring' | 'completed' | 'skipped' | 'error' | 'cancelled';
   progress: number;
   size: number;
   transferred: number;
@@ -104,12 +137,14 @@ export interface TransferItem {
   /** Config for this transfer to ensure correct server targeting */
   config?: FTPConfig;
   /** Internal promise resolution - used for awaiting specific transfers */
-  resolve?: () => void;
+  resolve?: (outcome: TransferOutcome) => void;
   /** Internal promise rejection - used for awaiting specific transfers */
-  reject?: (error: Error) => void;
+  reject?: (error: unknown) => void;
   /** Metadata to avoid redundant stat calls */
   targetExists?: boolean;
+  sourceType?: 'file' | 'directory' | 'symlink';
   targetType?: 'file' | 'directory' | 'symlink';
+  replaceTypeCollision?: boolean;
 }
 
 export interface SyncResult {

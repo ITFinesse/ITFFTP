@@ -16,6 +16,27 @@ export interface GitChangedFile {
   absolutePath: string;
 }
 
+interface GitChange {
+  readonly uri: vscode.Uri;
+  readonly status: number;
+}
+
+interface GitRepository {
+  readonly rootUri: vscode.Uri;
+  readonly state: {
+    readonly workingTreeChanges: readonly GitChange[];
+    readonly indexChanges: readonly GitChange[];
+  };
+}
+
+interface GitApi {
+  readonly repositories: readonly GitRepository[];
+}
+
+interface GitExtensionExports {
+  getAPI(version: 1): GitApi;
+}
+
 export class GitIntegration {
   private workspaceRoot: string;
 
@@ -41,14 +62,14 @@ export class GitIntegration {
     }
 
     try {
-      const gitExtension = vscode.extensions.getExtension('vscode.git');
+      const gitExtension = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
       if (!gitExtension) {
         logger.warn('Git extension not found');
         return this.getChangedFilesFromCLI();
       }
 
       const git = gitExtension.exports.getAPI(1);
-      const repo = git.repositories.find((r: any) =>
+      const repo = git.repositories.find(r =>
         r.rootUri.fsPath === this.workspaceRoot
       );
 
@@ -81,7 +102,7 @@ export class GitIntegration {
       }
 
       return changedFiles;
-    } catch (error: any) {
+    } catch (error) {
       logger.error('Failed to get changed files from Git API', error);
       return this.getChangedFilesFromCLI();
     }
@@ -96,13 +117,13 @@ export class GitIntegration {
     }
 
     try {
-      const gitExtension = vscode.extensions.getExtension('vscode.git');
+      const gitExtension = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
       if (!gitExtension) {
         return [];
       }
 
       const git = gitExtension.exports.getAPI(1);
-      const repo = git.repositories.find((r: any) =>
+      const repo = git.repositories.find(r =>
         r.rootUri.fsPath === this.workspaceRoot
       );
 
@@ -121,7 +142,7 @@ export class GitIntegration {
       }
 
       return stagedFiles;
-    } catch (error: any) {
+    } catch (error) {
       logger.error('Failed to get staged files', error);
       return [];
     }
@@ -135,7 +156,7 @@ export class GitIntegration {
       exec(
         'git status --porcelain',
         { cwd: this.workspaceRoot },
-        (error: any, stdout: string) => {
+        (error, stdout) => {
           if (error) {
             logger.error('Git CLI error', error);
             resolve([]);

@@ -2,12 +2,20 @@ import * as vscode from 'vscode';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
 import { statusBar } from '../utils/status-bar';
+import { errorMessage } from '../utils/helpers';
+import { FTPConfig } from '../types';
 import { getWorkspaceRoot } from './utils';
 
 import { ProviderContainer } from './index';
 
+interface ConnectionQuickPickItem extends vscode.QuickPickItem {
+  config: FTPConfig | null;
+  isPrimary: boolean;
+  isConnected: boolean;
+}
+
 export function registerViewCommands(container: ProviderContainer): vscode.Disposable[] {
-  const { remoteExplorer } = container;
+  const { remoteExplorer, settingsPanel } = container;
   const disposables: vscode.Disposable[] = [];
 
   const selectPrimaryConnectionCommand = vscode.commands.registerCommand('stackerftp.selectPrimaryConnection', async () => {
@@ -23,9 +31,9 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
     const activeConns = connectionManager.getAllActiveConnections();
     const primaryConfig = connectionManager.getPrimaryConfig();
 
-    const items = configs.map(config => {
+    const items: ConnectionQuickPickItem[] = configs.map(config => {
       const isConnected = connectionManager.isConnected(config);
-      const isPrimary = primaryConfig && config.name === primaryConfig.name && config.host === primaryConfig.host;
+      const isPrimary = Boolean(primaryConfig && config.name === primaryConfig.name && config.host === primaryConfig.host);
 
       let icon = '$(primitive-square)'; // Default disconnected
       if (isPrimary) {icon = '$(star-full)';}
@@ -53,7 +61,7 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
         label: '$(close-all) Disconnect All',
         description: `Disconnect from all ${activeConns.length} servers`,
         detail: '',
-        config: null as any,
+        config: null,
         isPrimary: false,
         isConnected: false
       });
@@ -100,8 +108,8 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
           connectionManager.setPrimaryConnection(selected.config);
         }
         vscode.commands.executeCommand('stackerftp.tree.refresh');
-      } catch (error: any) {
-        statusBar.error(`Connection failed: ${error.message}`, true);
+      } catch (error) {
+        statusBar.error(`Connection failed: ${errorMessage(error)}`, true);
       }
     }
   });
@@ -144,13 +152,15 @@ export function registerViewCommands(container: ProviderContainer): vscode.Dispo
   });
 
   const selectAllFilesCommand = vscode.commands.registerCommand('stackerftp.selectAllFiles', async () => {
-    try {
-      await vscode.commands.executeCommand('stackerftp.remoteExplorerTree.focus');
-      await vscode.commands.executeCommand('list.selectAll');
-      statusBar.success('Selected all visible remote items');
-    } catch (error: any) {
-      statusBar.error(`Select All failed: ${error.message || error}`);
+    const scope = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!scope || !settingsPanel) {
+      void vscode.window.showWarningMessage('Open a workspace to use Transfer.');
+      return;
     }
+    settingsPanel.open(scope);
+    void vscode.window.showInformationMessage(
+      'Select All belonged to the retired Remote Explorer tree. Select the required rows in Transfer.'
+    );
   });
 
   disposables.push(

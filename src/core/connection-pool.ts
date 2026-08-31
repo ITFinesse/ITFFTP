@@ -10,6 +10,7 @@ import { SFTPConnection } from './sftp-connection';
 import { FTPConnection } from './ftp-connection';
 import { FTPConfig } from '../types';
 import { logger } from '../utils/logger';
+import { connectionEndpointIdentity } from './connection-identity';
 
 interface PoolEntry {
   connection: BaseConnection;
@@ -21,6 +22,9 @@ interface ServerPool {
   entries: PoolEntry[];
   config: FTPConfig;
   connecting: number;
+  generation: number;
+  closing: boolean;
+  pendingConnections: Set<Promise<void>>;
 }
 
 const IDLE_TIMEOUT_MS = 60_000;
@@ -29,6 +33,8 @@ const CONNECT_TIMEOUT_MS = 15_000;
 
 export class ConnectionPool {
   private pools: Map<string, ServerPool> = new Map();
+  private poolGenerations: Map<string, number> = new Map();
+  private drainingKeys: Map<string, number> = new Map();
   private idleTimer: NodeJS.Timeout | null = null;
   private readonly debugThrottleMs = 2000;
   private readonly debugState = new Map<string, { lastEmittedAt: number; suppressed: number }>();
@@ -38,8 +44,7 @@ export class ConnectionPool {
   }
 
   private getKey(config: FTPConfig): string {
-    const port = config.port || (config.protocol === 'sftp' ? 22 : 21);
-    return `${config.name || config.host}:${port}-${config.username}`;
+    return connectionEndpointIdentity(config);
   }
 
   private createConnection(config: FTPConfig): BaseConnection {
@@ -52,6 +57,13 @@ export class ConnectionPool {
       default:
         throw new Error(`Unsupported protocol: ${config.protocol}`);
     }
+  }
+
+  private isCurrentPool(key: string, pool: ServerPool, generation: number): boolean {
+    return !pool.closing
+      && !this.drainingKeys.has(key)
+      && this.pools.get(key) === pool
+      && (this.poolGenerations.get(key) || 0) === generation;
   }
 
   private logPoolDebug(message: string, host: string, eventKey: string, trackSuppressed = true): void {
@@ -80,12 +92,27 @@ export class ConnectionPool {
    */
   async acquire(config: FTPConfig, poolSize?: number): Promise<BaseConnection> {
     const key = this.getKey(config);
-    const maxSize = Math.min(poolSize || MAX_POOL_SIZE, MAX_POOL_SIZE);
+    if (this.drainingKeys.has(key)) {
+      throw new Error(`Pool: connection pool for ${config.host} is draining`);
+    }
+
+    const maxSize = Math.max(1, Math.min(poolSize ?? MAX_POOL_SIZE, MAX_POOL_SIZE));
+    const generation = this.poolGenerations.get(key) || 0;
 
     let pool = this.pools.get(key);
     if (!pool) {
-      pool = { entries: [], config, connecting: 0 };
+      pool = {
+        entries: [],
+        config,
+        connecting: 0,
+        generation,
+        closing: false,
+        pendingConnections: new Set()
+      };
       this.pools.set(key, pool);
+    }
+    if (!this.isCurrentPool(key, pool, generation)) {
+      throw new Error(`Pool: connection pool for ${config.host} was invalidated`);
     }
 
     // Try to find an idle connection
@@ -104,8 +131,12 @@ export class ConnectionPool {
     // Create new connection if under limit (include in-flight connects to prevent race condition)
     if (pool.entries.length + pool.connecting < maxSize) {
       pool.connecting++;
-      const connection = this.createConnection(config);
+      let completePending!: () => void;
+      const pending = new Promise<void>(resolve => {completePending = resolve;});
+      pool.pendingConnections.add(pending);
+      let connection: BaseConnection | undefined;
       try {
+        connection = this.createConnection(config);
         let timeout: NodeJS.Timeout | undefined;
         try {
           await Promise.race([
@@ -114,6 +145,9 @@ export class ConnectionPool {
           ]);
         } finally {
           if (timeout) {clearTimeout(timeout);}
+        }
+        if (!this.isCurrentPool(key, pool, generation)) {
+          throw new Error(`Pool: connection pool for ${config.host} was drained while connecting`);
         }
         const entry: PoolEntry = {
           connection,
@@ -124,17 +158,21 @@ export class ConnectionPool {
         this.logPoolDebug(`Pool: new connection for ${config.host} (${pool.entries.length}/${maxSize})`, config.host, 'new');
         return connection;
       } catch (error) {
-        try { await connection.disconnect(); } catch { /* Best-effort cleanup after a failed pooled login. */ }
+        if (connection) {
+          try { await connection.disconnect(); } catch { /* Best-effort cleanup after a failed pooled login. */ }
+        }
         logger.error(`Pool: failed to create connection for ${config.host}`, error);
         throw error;
       } finally {
         pool.connecting--;
+        pool.pendingConnections.delete(pending);
+        completePending();
       }
     }
 
     // All connections busy - wait for one to become available
     this.logPoolDebug(`Pool: all ${maxSize} connections busy for ${config.host}, waiting...`, config.host, 'wait');
-    return this.waitForAvailable(pool, config);
+    return this.waitForAvailable(key, pool, generation, config, maxSize);
   }
 
   /**
@@ -143,7 +181,10 @@ export class ConnectionPool {
   release(config: FTPConfig, connection: BaseConnection): void {
     const key = this.getKey(config);
     const pool = this.pools.get(key);
-    if (!pool) {return;}
+    if (!pool || pool.closing) {
+      void connection.disconnect().catch(() => {});
+      return;
+    }
 
     for (let i = 0; i < pool.entries.length; i++) {
       const entry = pool.entries[i];
@@ -160,6 +201,29 @@ export class ConnectionPool {
         return;
       }
     }
+
+    // The connection belongs to a retired pool generation. Never leave an
+    // untracked transport alive after a concurrent drain/recreate cycle.
+    void connection.disconnect().catch(() => {});
+  }
+
+  /**
+   * Remove and close one checked-out pooled session even when its transport
+   * still reports connected after a classified closed-session error.
+   */
+  async discard(config: FTPConfig, connection: BaseConnection): Promise<void> {
+    const key = this.getKey(config);
+    const pool = this.pools.get(key);
+    if (pool) {
+      const index = pool.entries.findIndex(entry => entry.connection === connection);
+      if (index !== -1) {pool.entries.splice(index, 1);}
+    }
+
+    try {
+      await connection.disconnect();
+    } catch {
+      this.logPoolDebug(`Pool: error discarding connection for ${config.host}`, config.host, 'discard-error', false);
+    }
   }
 
   /**
@@ -167,54 +231,84 @@ export class ConnectionPool {
    */
   async drain(config: FTPConfig): Promise<void> {
     const key = this.getKey(config);
+    const nextGeneration = (this.poolGenerations.get(key) || 0) + 1;
+    this.poolGenerations.set(key, nextGeneration);
+    this.drainingKeys.set(key, (this.drainingKeys.get(key) || 0) + 1);
     const pool = this.pools.get(key);
-    if (!pool) {return;}
+    if (pool) {
+      pool.closing = true;
+      this.pools.delete(key);
+    }
 
-    const disconnectPromises = pool.entries.map(async (entry) => {
-      try {
-        if (entry.connection.connected) {
+    try {
+      if (!pool) {return;}
+      const disconnectPromises = pool.entries.map(async entry => {
+        try {
           await entry.connection.disconnect();
+        } catch {
+          this.logPoolDebug(`Pool: error draining connection for ${config.host}`, config.host, 'drain-error', false);
         }
-      } catch (error) {
-        this.logPoolDebug(`Pool: error draining connection for ${config.host}`, config.host, 'drain-error', false);
-      }
-    });
+      });
 
-    await Promise.all(disconnectPromises);
-    this.pools.delete(key);
-    this.logPoolDebug(`Pool: drained all connections for ${config.host}`, config.host, 'drained', false);
+      await Promise.all([...disconnectPromises, ...pool.pendingConnections]);
+      pool.entries = [];
+      this.logPoolDebug(`Pool: drained all connections for ${config.host}`, config.host, 'drained', false);
+    } finally {
+      const remainingDrains = (this.drainingKeys.get(key) || 1) - 1;
+      if (remainingDrains > 0) {this.drainingKeys.set(key, remainingDrains);}
+      else {this.drainingKeys.delete(key);}
+    }
   }
 
   /**
    * Drain all pools (used on full disconnect).
    */
   async drainAll(): Promise<void> {
-    const drainPromises: Promise<void>[] = [];
-    for (const [, pool] of this.pools) {
-      drainPromises.push(this.drain(pool.config));
-    }
+    const drainPromises = [...this.pools.values()].map(pool => this.drain(pool.config));
     await Promise.all(drainPromises);
   }
 
-  private waitForAvailable(pool: ServerPool, config: FTPConfig): Promise<BaseConnection> {
+  private waitForAvailable(
+    key: string,
+    pool: ServerPool,
+    generation: number,
+    config: FTPConfig,
+    maxSize: number
+  ): Promise<BaseConnection> {
     return new Promise((resolve, reject) => {
+      const finish = (error?: Error, connection?: BaseConnection): void => {
+        clearInterval(checkInterval);
+        clearTimeout(timeoutId);
+        if (error) {reject(error);}
+        else if (connection) {resolve(connection);}
+      };
       const checkInterval = setInterval(() => {
+        if (!this.isCurrentPool(key, pool, generation)) {
+          finish(new Error(`Pool: connection pool for ${config.host} was drained while waiting`));
+          return;
+        }
         for (const entry of pool.entries) {
           if (!entry.inUse && entry.connection.connected) {
-            clearInterval(checkInterval);
-            clearTimeout(timeoutId);
             entry.inUse = true;
             entry.lastUsed = Date.now();
-            resolve(entry.connection);
+            finish(undefined, entry.connection);
             return;
           }
+        }
+
+        // A connection attempt or checked-out session may have failed while
+        // this acquire was queued. Claim the newly available capacity instead
+        // of waiting for an idle entry that can never appear.
+        if (pool.entries.length + pool.connecting < maxSize) {
+          clearInterval(checkInterval);
+          clearTimeout(timeoutId);
+          void this.acquire(config, maxSize).then(resolve, reject);
         }
       }, 50);
 
       // Timeout after 30s
       const timeoutId = setTimeout(() => {
-        clearInterval(checkInterval);
-        reject(new Error(`Pool: timeout waiting for available connection to ${config.host}`));
+        finish(new Error(`Pool: timeout waiting for available connection to ${config.host}`));
       }, 30_000);
     });
   }
@@ -238,6 +332,7 @@ export class ConnectionPool {
         }
       }
     }, 30_000);
+    this.idleTimer.unref?.();
   }
 
   dispose(): void {

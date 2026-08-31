@@ -67,7 +67,7 @@ These screenshots are intentionally redacted: hostnames, connection names, usern
 - Git and Source Control integration for changed-file uploads.
 - File watcher with configured auto-upload and auto-delete behavior.
 - Remote document viewing with binary-file safeguards and optional download-on-open.
-- Native Remote Explorer tree plus the legacy WebView explorer surface.
+- Native Remote Explorer tree with file-theme icons and preview support.
 - Structured ITFFTP output logging and clickable status/progress indicators.
 - Right-click ITFFTP actions grouped together at the bottom of Explorer, editor, and Source Control menus.
 
@@ -98,7 +98,7 @@ FTP and FTPS use the same profile shape with `"protocol": "ftp"` or `"protocol":
 
 ## Dashboard settings
 
-The dashboard owns auto-connect, auto-reconnect, refresh behavior, hidden files, delete/sync confirmations, WebMaster visibility, file watching, syntax highlighting, native-tree selection, download-on-open, transfer concurrency, explorer sorting, reusable named remotes, and connection profile JSON. The native VS Code configuration namespace remains available for compatibility, but the dashboard is the supported editing surface.
+The dashboard owns auto-connect, auto-reconnect, refresh behavior, hidden files, delete/sync confirmations, WebMaster visibility, file watching, remote-file syntax highlighting, download-on-open, transfer concurrency, explorer sorting, reusable named remotes, and connection profile JSON. The native VS Code configuration namespace remains available for compatibility, but the dashboard is the supported editing surface.
 
 ## Installation
 

@@ -4,11 +4,19 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { Client, SFTPWrapper } from 'ssh2';
-import { BaseConnection } from './connection';
+import { Client, ConnectConfig, SFTPWrapper } from 'ssh2';
+import {
+  BaseConnection,
+  assertTransferredFile,
+  atomicDownloadToLocalFile,
+  TransferSerializationOptions,
+  uniqueRemoteSiblingPath,
+  withSerializedLocalWrite,
+  withSerializedRemoteWrite
+} from './connection';
 import { FileEntry } from '../types';
 import { logger } from '../utils/logger';
-import { normalizeRemotePath } from '../utils/helpers';
+import { errorCode, errorMessage, normalizeRemotePath } from '../utils/helpers';
 import { connectionHopping } from './connection-hopping';
 
 export class SFTPConnection extends BaseConnection {
@@ -27,7 +35,7 @@ export class SFTPConnection extends BaseConnection {
     return new Promise((resolve, reject) => {
       this.client = new Client();
 
-      const connectConfig: any = {
+      const connectConfig: ConnectConfig = {
         host: this.config.host,
         port: this.config.port || 22,
         username: this.config.username,
@@ -43,7 +51,7 @@ export class SFTPConnection extends BaseConnection {
             connectConfig.passphrase = this.config.passphrase;
           }
         } catch (error) {
-          reject(new Error(`Failed to load private key: ${error}`));
+          reject(new Error(`Failed to load private key: ${errorMessage(error)}`));
           return;
         }
       } else if (this.config.password) {
@@ -118,7 +126,9 @@ export class SFTPConnection extends BaseConnection {
       this.client = null;
       this.sftp = null;
       this._connected = false;
+      this.emit('disconnected');
     }
+    await super.disconnect();
   }
 
   async list(remotePath: string): Promise<FileEntry[]> {
@@ -132,7 +142,7 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.readdir(remotePath, async (err: any, list: any[]) => {
+      this.sftp.readdir(remotePath, async (err, list) => {
         if (err) {
           reject(err);
           return;
@@ -199,7 +209,7 @@ export class SFTPConnection extends BaseConnection {
       }
 
       // Use stat instead of lstat to follow symlinks
-      this.sftp.stat(remotePath, (err: any, stats: any) => {
+      this.sftp.stat(remotePath, (err, stats) => {
         if (err) {
           resolve(null);
           return;
@@ -216,9 +226,11 @@ export class SFTPConnection extends BaseConnection {
     });
   }
 
-  async download(remotePath: string, localPath: string): Promise<void> {
+  async download(remotePath: string, localPath: string, serialization?: TransferSerializationOptions): Promise<void> {
     // Bypass enqueue for parallel transfers - ssh2 handles concurrent file transfers internally
-    return this._download(remotePath, localPath);
+    return serialization?.writeLockHeld
+      ? this._download(remotePath, localPath)
+      : withSerializedLocalWrite(localPath, () => this._download(remotePath, localPath));
   }
 
   private async _download(remotePath: string, localPath: string): Promise<void> {
@@ -227,41 +239,25 @@ export class SFTPConnection extends BaseConnection {
     }
 
     this.emit('transferStart', { direction: 'download', remotePath, localPath });
-
-    // Ensure local directory exists
-    const localDir = path.dirname(localPath);
-    await fs.promises.mkdir(localDir, { recursive: true });
-
-    // EISDIR safety: check if local path is already a directory
-    try {
-      const stats = await fs.promises.stat(localPath);
-      if (stats.isDirectory()) {
-        throw new Error(`Cannot download to ${localPath}: a directory exists at this path.`);
-      }
-    } catch (e: any) {
-      if (e.code !== 'ENOENT') {throw e;}
-    }
-
-    return new Promise((resolve, reject) => {
-      this.sftp!.fastGet(remotePath, localPath, {
-        concurrency: 128,
-        chunkSize: 262144, // 256KB
-        step: (transferred) => {
-          this.emitProgress(remotePath, transferred, 0);
-        }
-      }, (err) => {
-        if (err) {reject(err);}
-        else {
-          this.emit('transferComplete', { direction: 'download', remotePath, localPath });
-          resolve();
-        }
+    const source = await this._stat(remotePath);
+    assertTransferredFile(source, source?.size ?? -1, `Remote download source ${remotePath}`);
+    await atomicDownloadToLocalFile(localPath, source.size, source.modifyTime, stagingPath => {
+      return new Promise<void>((resolve, reject) => {
+        this.sftp!.fastGet(remotePath, stagingPath, {
+          concurrency: 128,
+          chunkSize: 262144,
+          step: transferred => this.emitProgress(remotePath, transferred, source.size)
+        }, error => error ? reject(error) : resolve());
       });
     });
+    this.emit('transferComplete', { direction: 'download', remotePath, localPath });
   }
 
-  async upload(localPath: string, remotePath: string): Promise<void> {
+  async upload(localPath: string, remotePath: string, serialization?: TransferSerializationOptions): Promise<void> {
     // Bypass enqueue for parallel transfers - ssh2 handles concurrent file transfers internally
-    return this._upload(localPath, remotePath);
+    return serialization?.writeLockHeld
+      ? this._upload(localPath, remotePath)
+      : withSerializedRemoteWrite(this.config, remotePath, () => this._upload(localPath, remotePath));
   }
 
   private async _upload(localPath: string, remotePath: string): Promise<void> {
@@ -280,40 +276,77 @@ export class SFTPConnection extends BaseConnection {
     const stats = await fs.promises.stat(localPath);
     const totalSize = stats.size;
 
-    // Atomic upload: upload to temp file first, then rename
-    const tempRemotePath = `${remotePath}.stackerftp.tmp`;
+    const stagingPath = uniqueRemoteSiblingPath(remotePath, 'upload');
+    const backupPath = uniqueRemoteSiblingPath(remotePath, 'backup');
+    let promoted = false;
+    let backupCreated = false;
+    let verified = false;
 
-    return new Promise((resolve, reject) => {
-      this.sftp!.fastPut(localPath, tempRemotePath, {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.sftp!.fastPut(localPath, stagingPath, {
         concurrency: 128,
-        chunkSize: 262144, // 256KB
-        step: (transferred) => {
-          this.emitProgress(localPath, transferred, totalSize);
-        }
-      }, (err) => {
-        if (err) {
-          // Cleanup temp file on failure
-          this.sftp!.unlink(tempRemotePath, () => {
-            reject(err);
-          });
-          return;
-        }
-
-        // Rename temp to target
-        this.sftp!.unlink(remotePath, () => {
-          this.sftp!.rename(tempRemotePath, remotePath, (renameErr) => {
-            if (renameErr) {
-              this.sftp!.unlink(tempRemotePath, () => {
-                reject(renameErr);
-              });
-            } else {
-              this.emit('transferComplete', { direction: 'upload', localPath, remotePath });
-              resolve();
-            }
-          });
-        });
+          chunkSize: 262144,
+          step: transferred => this.emitProgress(localPath, transferred, totalSize)
+        }, error => error ? reject(error) : resolve());
       });
-    });
+
+      assertTransferredFile(await this._stat(stagingPath), totalSize, `Remote upload staging file ${stagingPath}`);
+      const targetBefore = await this._stat(remotePath);
+      try {
+        await this._rename(stagingPath, remotePath);
+        promoted = true;
+      } catch (directRenameError) {
+        if (!targetBefore) {throw directRenameError;}
+        await this._rename(remotePath, backupPath);
+        backupCreated = true;
+        try {
+          await this._rename(stagingPath, remotePath);
+          promoted = true;
+        } catch (promotionError) {
+          try {
+            await this._rename(backupPath, remotePath);
+            backupCreated = false;
+          } catch (rollbackError) {
+            throw Object.assign(
+              new Error(`SFTP upload promotion and rollback failed for ${remotePath}; previous data remains at ${backupPath}`),
+              { promotionError, rollbackError }
+            );
+          }
+          throw promotionError;
+        }
+      }
+
+      assertTransferredFile(await this._stat(remotePath), totalSize, `Remote upload target ${remotePath}`);
+      verified = true;
+      this.emit('transferComplete', { direction: 'upload', localPath, remotePath });
+    } catch (error) {
+      if (backupCreated && promoted && !verified) {
+        try {
+          await this._rename(remotePath, stagingPath);
+          promoted = false;
+          await this._rename(backupPath, remotePath);
+          backupCreated = false;
+        } catch (rollbackError) {
+          throw Object.assign(
+            new Error(`SFTP upload verification and rollback failed for ${remotePath}; previous data remains at ${backupPath}`),
+            { uploadError: error, rollbackError }
+          );
+        }
+      }
+      throw error;
+    } finally {
+      if (!promoted) {
+        try {await this._delete(stagingPath);}
+        catch (cleanupError) {
+          if (errorCode(cleanupError) !== 2) {logger.warn(`Failed to clean SFTP upload staging file ${stagingPath}`, cleanupError);}
+        }
+      }
+      if (backupCreated && verified) {
+        try {await this._delete(backupPath);}
+        catch (cleanupError) {logger.warn(`Failed to clean SFTP upload backup ${backupPath}`, cleanupError);}
+      }
+    }
   }
 
   async setModifyTime(remotePath: string, modifyTime: Date): Promise<boolean> {
@@ -338,7 +371,7 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.unlink(remotePath, (err: any) => {
+      this.sftp.unlink(remotePath, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -373,7 +406,7 @@ export class SFTPConnection extends BaseConnection {
 
       try {
         await this._mkdirDirect(currentPath);
-      } catch (err: any) {
+      } catch (err) {
         // Some SFTP servers return generic failure for "already exists".
         const createdAfterError = await this._statDirect(currentPath);
         if (!createdAfterError?.isDirectory()) {
@@ -390,9 +423,9 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.stat(remotePath, (err: any, stats: any) => {
+      this.sftp.stat(remotePath, (err, stats) => {
         if (err) {
-          if (err.code === 2) {
+          if (errorCode(err) === 2) {
             resolve(null);
           } else {
             reject(err);
@@ -412,7 +445,7 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.mkdir(remotePath, (err: any) => {
+      this.sftp.mkdir(remotePath, (err) => {
         if (err) {
           reject(err);
         } else {
@@ -455,7 +488,7 @@ export class SFTPConnection extends BaseConnection {
     }
 
     return new Promise((resolve, reject) => {
-      this.sftp!.rmdir(remotePath, (err: any) => {
+      this.sftp!.rmdir(remotePath, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -536,7 +569,7 @@ export class SFTPConnection extends BaseConnection {
 
     // Finally remove the empty directory
     return new Promise((resolve, reject) => {
-      this.sftp!.rmdir(remotePath, (err: any) => {
+      this.sftp!.rmdir(remotePath, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -556,7 +589,7 @@ export class SFTPConnection extends BaseConnection {
     }
 
     await new Promise<void>((resolve, reject) => {
-      this.sftp!.rename(oldPath, newPath, (err: any) => {
+      this.sftp!.rename(oldPath, newPath, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -564,12 +597,7 @@ export class SFTPConnection extends BaseConnection {
   }
 
   async exists(remotePath: string): Promise<boolean> {
-    try {
-      await this.stat(remotePath);
-      return true;
-    } catch {
-      return false;
-    }
+    return (await this.stat(remotePath)) !== null;
   }
 
   async stat(remotePath: string): Promise<FileEntry | null> {
@@ -583,9 +611,9 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.stat(remotePath, (err: any, stats: any) => {
+      this.sftp.stat(remotePath, (err, stats) => {
         if (err) {
-          if (err.code === 2) {
+          if (errorCode(err) === 2) {
             resolve(null);
           } else {
             reject(err);
@@ -626,7 +654,7 @@ export class SFTPConnection extends BaseConnection {
 
       const modeNum = typeof mode === 'string' ? parseInt(mode, 8) : mode;
 
-      this.sftp.chmod(remotePath, modeNum, (err: any) => {
+      this.sftp.chmod(remotePath, modeNum, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -644,7 +672,7 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.sftp.readFile(remotePath, (err: any, data: Buffer) => {
+      this.sftp.readFile(remotePath, (err, data) => {
         if (err) {reject(err);}
         else {resolve(data);}
       });
@@ -665,7 +693,7 @@ export class SFTPConnection extends BaseConnection {
 
     const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8');
     await new Promise<void>((resolve, reject) => {
-      this.sftp!.writeFile(remotePath, buffer, (err: any) => {
+      this.sftp!.writeFile(remotePath, buffer, (err) => {
         if (err) {reject(err);}
         else {resolve();}
       });
@@ -683,7 +711,7 @@ export class SFTPConnection extends BaseConnection {
         return;
       }
 
-      this.client.exec(command, (err: any, stream: any) => {
+      this.client.exec(command, (err, stream) => {
         if (err) {
           reject(err);
           return;

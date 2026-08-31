@@ -307,7 +307,7 @@ export function truncate(str: string, maxLength: number): string {
   return str.substring(0, maxLength - 3) + '...';
 }
 
-export function debounce<T extends (...args: any[]) => any>(
+export function debounce<T extends (...args: never[]) => unknown>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
@@ -318,8 +318,8 @@ export function debounce<T extends (...args: any[]) => any>(
   };
 }
 
-export function safeJsonStringify(obj: any, indent: number = 2): string {
-  const cache = new Set();
+export function safeJsonStringify(obj: unknown, indent: number = 2): string {
+  const cache = new Set<object>();
   return JSON.stringify(obj, (key, value) => {
     if (typeof value === 'object' && value !== null) {
       if (cache.has(value)) {
@@ -340,14 +340,31 @@ export function deepClone<T>(obj: T): T {
   }
 }
 
-export function mergeConfig(base: any, override: any): any {
+export function mergeConfig<T extends object>(base: T, override: Partial<T>): T {
   const result = { ...base };
-  for (const key in override) {
-    if (override[key] !== undefined && override[key] !== null) {
-      result[key] = override[key];
+  for (const key of Object.keys(override) as Array<keyof T>) {
+    const value = override[key];
+    if (value !== undefined && value !== null) {
+      result[key] = value as T[keyof T];
     }
   }
   return result;
+}
+
+export function errorMessage(error: unknown, fallback = 'Unknown error'): string {
+  if (error instanceof Error && error.message) {return error.message;}
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (message !== undefined && message !== null && String(message)) {return String(message);}
+  }
+  const message = String(error ?? '');
+  return message && message !== '[object Object]' ? message : fallback;
+}
+
+export function errorCode(error: unknown): string | number | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {return undefined;}
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' || typeof code === 'number' ? code : undefined;
 }
 
 // Binary file extensions that should not be opened as text

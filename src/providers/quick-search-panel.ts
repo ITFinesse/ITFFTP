@@ -9,15 +9,106 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { configManager } from '../core/config';
 import { connectionManager } from '../core/connection-manager';
+import { isConnectionClosedError } from '../core/connection-errors';
+import type { BaseConnection } from '../core/connection';
+import { runBoundedRecursiveScan } from '../core/recursive-scan';
 import { getWorkspaceRoot } from '../commands/utils';
-import { formatFileSize } from '../utils/helpers';
+import { errorMessage, formatFileSize, normalizeRemotePath, resolveLocalRoot } from '../utils/helpers';
 import { statusBar } from '../utils/status-bar';
+import type { FileEntry, FTPConfig } from '../types';
+
+export interface QuickSearchResult {
+  name: string;
+  path: string;
+  size: number;
+  type: 'file' | 'directory';
+  sizeFormatted: string;
+}
+
+export interface QuickSearchTraversalOptions {
+  concurrency?: number;
+  maxDirectories?: number;
+  maxDepth?: number;
+  maxResults?: number;
+}
+
+export const MAX_QUICK_SEARCH_RESULTS = 10_000;
+
+export class QuickSearchResultLimitError extends Error {
+  constructor(public readonly maximum: number) {
+    super(`Quick Search exceeded the maximum result count of ${maximum}. Refine the search text or choose a narrower remote folder.`);
+    this.name = 'QuickSearchResultLimitError';
+  }
+}
+
+/**
+ * Search every reachable directory within the shared, explicit traversal
+ * limits. Results are never returned as if complete after a depth, directory,
+ * result, or listing failure.
+ */
+export async function searchRemoteTree(
+  listDirectory: (directory: string, workerIndex: number) => Promise<FileEntry[]>,
+  startDirectory: string,
+  query: string,
+  options: QuickSearchTraversalOptions = {}
+): Promise<QuickSearchResult[]> {
+  const results: QuickSearchResult[] = [];
+  const pattern = query.toLowerCase();
+  const maxResults = options.maxResults ?? MAX_QUICK_SEARCH_RESULTS;
+  if (!Number.isSafeInteger(maxResults) || maxResults < 1) {
+    throw new RangeError('maxResults must be a positive safe integer.');
+  }
+
+  await runBoundedRecursiveScan<QuickSearchResult[]>({
+    startDirectory: normalizeRemotePath(startDirectory),
+    concurrency: options.concurrency ?? 4,
+    maxDirectories: options.maxDirectories,
+    maxDepth: options.maxDepth,
+    isCancelled: () => false,
+    scanDirectory: async (directory, workerIndex) => {
+      const entries = await listDirectory(directory, workerIndex);
+      const childDirectories: string[] = [];
+      const matches: QuickSearchResult[] = [];
+      for (const entry of entries) {
+        if (entry.type === 'directory') {childDirectories.push(entry.path);}
+        if (entry.type !== 'file' && entry.type !== 'directory') {continue;}
+        if (!entry.name.toLowerCase().includes(pattern)) {continue;}
+        matches.push({
+          name: entry.name,
+          path: entry.path,
+          size: entry.type === 'file' ? entry.size : 0,
+          type: entry.type === 'directory' ? 'directory' : 'file',
+          sizeFormatted: entry.type === 'directory' ? 'Folder' : formatFileSize(entry.size)
+        });
+      }
+      return { childDirectories, value: matches };
+    },
+    onBatch: entries => {
+      const batchMatches = entries.flatMap(entry => entry.value);
+      if (results.length + batchMatches.length > maxResults) {
+        throw new QuickSearchResultLimitError(maxResults);
+      }
+      results.push(...batchMatches);
+    }
+  });
+
+  results.sort((a, b) => {
+    if (a.type !== b.type) {return a.type === 'directory' ? -1 : 1;}
+    return a.name.localeCompare(b.name);
+  });
+  return results;
+}
+
+type QuickSearchMessage =
+  | { type: 'search'; query: string }
+  | { type: 'openFile' | 'downloadFile' | 'revealInExplorer'; path: string }
+  | { type: 'changePath' };
 
 export class QuickSearchPanel {
   private static _panel?: vscode.WebviewPanel;
   private static _extensionUri?: vscode.Uri;
-  private static _connection?: any;
-  private static _config?: any;
+  private static _connection?: BaseConnection;
+  private static _config?: FTPConfig;
   private static _workspaceRoot?: string;
   private static _searchPath?: string;
 
@@ -40,17 +131,29 @@ export class QuickSearchPanel {
     // Determine search path
     let searchPath = config.remotePath;
     let searchLabel = 'Entire Remote';
+    let remoteCandidate: string | undefined;
 
     if (uri) {
-      // Try to get path from tree item
+      // A real local folder maps relative to the configured local root. Remote
+      // Explorer items arrive as file URIs whose local stat does not exist; in
+      // that case retain the URI path and resolve its type after connecting.
       try {
         const stat = await vscode.workspace.fs.stat(uri);
         if (stat.type === vscode.FileType.Directory) {
-          searchPath = uri.fsPath;
-          searchLabel = path.basename(searchPath);
+          const localRoot = resolveLocalRoot(workspaceRoot, config.localPath);
+          const relativePath = path.relative(localRoot, uri.fsPath);
+          const isConfiguredDescendant = relativePath === '' || (
+            relativePath !== '..' &&
+            !relativePath.startsWith(`..${path.sep}`) &&
+            !path.isAbsolute(relativePath)
+          );
+          if (isConfiguredDescendant) {
+            searchPath = normalizeRemotePath(path.join(config.remotePath, relativePath));
+            searchLabel = path.basename(uri.fsPath) || 'Entire Remote';
+          }
         }
       } catch {
-        // Not a directory in workspace, check if it's from remote explorer
+        remoteCandidate = normalizeRemotePath(uri.path || uri.fsPath);
       }
     }
 
@@ -86,9 +189,25 @@ export class QuickSearchPanel {
     // Connect and show initial state
     try {
       this._connection = await connectionManager.ensureConnection(config);
+      if (remoteCandidate) {
+        try {
+          const entry = await this._connection.stat(remoteCandidate);
+          if (!entry) {
+            throw new Error('Remote search path was not found');
+          }
+          searchPath = entry.type === 'directory'
+            ? remoteCandidate
+            : normalizeRemotePath(path.posix.dirname(remoteCandidate));
+          searchLabel = path.posix.basename(searchPath) || 'Entire Remote';
+        } catch {
+          searchPath = config.remotePath;
+          searchLabel = 'Entire Remote';
+        }
+        this._searchPath = searchPath;
+      }
       this._updateHtml(this._getInitialHtml(searchLabel));
-    } catch (error: any) {
-      this._updateHtml(this._getErrorHtml(error.message));
+    } catch (error) {
+      this._updateHtml(this._getErrorHtml(errorMessage(error)));
     }
   }
 
@@ -113,7 +232,7 @@ export class QuickSearchPanel {
   /**
    * Handle messages from webview
    */
-  private static async _handleMessage(data: any): Promise<void> {
+  private static async _handleMessage(data: QuickSearchMessage): Promise<void> {
     switch (data.type) {
       case 'search':
         await this._performSearch(data.query);
@@ -150,109 +269,54 @@ export class QuickSearchPanel {
       const elapsed = Date.now() - startTime;
 
       this._updateHtml(this._getResultsHtml(results, query, false, elapsed));
-    } catch (error: any) {
-      this._updateHtml(this._getErrorHtml(error.message));
+    } catch (error) {
+      this._updateHtml(this._getResultsHtml([], query, false, undefined, errorMessage(error)));
     }
   }
 
   /**
    * Fast parallel search - optimized
    */
-  private static async _fastSearch(query: string): Promise<any[]> {
-    const results: any[] = [];
+  private static async _fastSearch(query: string): Promise<QuickSearchResult[]> {
+    const connection = this._connection;
+    const config = this._config;
+    if (!connection || !config) {return [];}
     const searchPath = this._searchPath || this._config?.remotePath || '/';
-    const pattern = query.toLowerCase();
+    const configuredConcurrency = vscode.workspace.getConfiguration('stackerftp').get<number>('transferConcurrency', 4);
+    const concurrency = config.protocol === 'sftp'
+      ? 1
+      : Math.min(10, Math.max(1, Math.round(configuredConcurrency)));
+    const workerConnections = new Map<number, BaseConnection>([[0, connection]]);
+    const closedWorkers = new Set<BaseConnection>();
 
-    // Simple string matching - much faster than regex
-    const matches = (name: string): boolean => {
-      return name.toLowerCase().includes(pattern);
+    const connectionForWorker = async (workerIndex: number): Promise<BaseConnection> => {
+      const existing = workerConnections.get(workerIndex);
+      if (existing) {return existing;}
+      const pooled = await connectionManager.getStrictPooledConnection(config);
+      workerConnections.set(workerIndex, pooled);
+      return pooled;
     };
 
-    const maxResults = 50; // Reduced for speed
-    const maxDepth = 5; // Reduced depth
-    const maxConcurrency = 10; // Limit concurrent requests
-
-    // Queue for breadth-first search
-    const queue: { path: string; depth: number }[] = [{ path: searchPath, depth: 0 }];
-    let activeRequests = 0;
-
-    // Process queue with concurrency limit
-    const processQueue = async (): Promise<void> => {
-      while (queue.length > 0 && results.length < maxResults) {
-        if (activeRequests >= maxConcurrency) {
-          // Wait for a slot to free up
-          await new Promise(resolve => setTimeout(resolve, 50));
-          continue;
-        }
-
-        const item = queue.shift();
-        if (!item || item.depth > maxDepth) {continue;}
-
-        activeRequests++;
-
+    try {
+      return await searchRemoteTree(async (directory, workerIndex) => {
+        const worker = await connectionForWorker(workerIndex);
         try {
-          const entries = await this._connection.list(item.path) as any[];
-
-          const files = entries.filter((e: any) => e.type === 'file');
-          const dirs = entries.filter((e: any) => e.type === 'directory');
-
-          // Check files for match
-          for (const entry of files) {
-            if (results.length >= maxResults) {
-              activeRequests--;
-              return;
-            }
-            if (matches(entry.name)) {
-              results.push({
-                name: entry.name,
-                path: entry.path,
-                size: entry.size,
-                type: 'file',
-                sizeFormatted: formatFileSize(entry.size)
-              });
-            }
-          }
-
-          // Check directories for match
-          for (const entry of dirs) {
-            if (results.length >= maxResults) {
-              activeRequests--;
-              return;
-            }
-            if (matches(entry.name)) {
-              results.push({
-                name: entry.name,
-                path: entry.path,
-                size: 0,
-                type: 'directory',
-                sizeFormatted: 'Folder'
-              });
-            }
-          }
-
-          // Add subdirectories to queue
-          if (item.depth < maxDepth) {
-            for (const dir of dirs) {
-              queue.push({ path: dir.path, depth: item.depth + 1 });
-            }
-          }
-        } catch {
-          // Skip inaccessible directories
+          return await worker.list(directory);
+        } catch (error) {
+          if (worker !== connection && isConnectionClosedError(error)) {closedWorkers.add(worker);}
+          throw error;
         }
-
-        activeRequests--;
-      }
-    };
-
-    await processQueue();
-
-    // Sort: directories first, then by name
-    results.sort((a, b) => {
-      if (a.type !== b.type) {return a.type === 'directory' ? -1 : 1;}
-      return a.name.localeCompare(b.name);
-    });
-
-    return results;
+      }, searchPath, query, { concurrency });
+    } finally {
+      const pooledWorkers = [...workerConnections.values()].filter(worker => worker !== connection);
+      await Promise.allSettled(pooledWorkers.map(async worker => {
+        if (closedWorkers.has(worker)) {
+          await connectionManager.discardPooledConnection(config, worker);
+        } else {
+          connectionManager.releasePooledConnection(config, worker);
+        }
+      }));
+    }
   }
 
   /**
@@ -268,9 +332,13 @@ export class QuickSearchPanel {
    * Open file
    */
   private static async _openFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) {return;}
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
+    const connection = this._connection;
 
-    const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
+    const localPath = path.join(
+      resolveLocalRoot(this._workspaceRoot, this._config.localPath),
+      path.relative(this._config.remotePath, filePath)
+    );
     const localDir = path.dirname(localPath);
 
     try {
@@ -278,11 +346,11 @@ export class QuickSearchPanel {
         fs.mkdirSync(localDir, { recursive: true });
       }
 
-      await this._connection.download(filePath, localPath);
+      await connection.download(filePath, localPath);
       const doc = await vscode.workspace.openTextDocument(localPath);
       await vscode.window.showTextDocument(doc);
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Failed to open: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to open: ${errorMessage(error)}`);
     }
   }
 
@@ -290,9 +358,13 @@ export class QuickSearchPanel {
    * Download file
    */
   private static async _downloadFile(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) {return;}
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
+    const connection = this._connection;
 
-    const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
+    const localPath = path.join(
+      resolveLocalRoot(this._workspaceRoot, this._config.localPath),
+      path.relative(this._config.remotePath, filePath)
+    );
     const localDir = path.dirname(localPath);
 
     try {
@@ -300,10 +372,10 @@ export class QuickSearchPanel {
         fs.mkdirSync(localDir, { recursive: true });
       }
 
-      await this._connection.download(filePath, localPath);
+      await connection.download(filePath, localPath);
       statusBar.success(`Downloaded: ${path.basename(filePath)}`);
-    } catch (error: any) {
-      vscode.window.showErrorMessage(`Failed to download: ${error.message}`);
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to download: ${errorMessage(error)}`);
     }
   }
 
@@ -311,9 +383,13 @@ export class QuickSearchPanel {
    * Reveal in explorer
    */
   private static async _revealInExplorer(filePath: string): Promise<void> {
-    if (!this._workspaceRoot || !this._config) {return;}
+    if (!this._workspaceRoot || !this._config || !this._connection) {return;}
+    const connection = this._connection;
 
-    const localPath = path.join(this._workspaceRoot, path.relative(this._config.remotePath, filePath));
+    const localPath = path.join(
+      resolveLocalRoot(this._workspaceRoot, this._config.localPath),
+      path.relative(this._config.remotePath, filePath)
+    );
 
     if (fs.existsSync(localPath)) {
       await vscode.commands.executeCommand('revealFileInExplorer', vscode.Uri.file(localPath));
@@ -323,7 +399,7 @@ export class QuickSearchPanel {
       if (!fs.existsSync(localDir)) {
         fs.mkdirSync(localDir, { recursive: true });
       }
-      await this._connection.download(filePath, localPath);
+      await connection.download(filePath, localPath);
       await vscode.commands.executeCommand('revealFileInExplorer', vscode.Uri.file(localPath));
     }
   }
@@ -642,11 +718,25 @@ export class QuickSearchPanel {
   /**
    * Get results HTML
    */
-  private static _getResultsHtml(results: any[], query: string, isEmpty: boolean, elapsed?: number): string {
+  private static _getResultsHtml(
+    results: QuickSearchResult[],
+    query: string,
+    isEmpty: boolean,
+    elapsed?: number,
+    searchError?: string
+  ): string {
     const escapedQuery = query.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escapedSearchError = searchError
+      ?.replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
     let resultsHtml = '';
-    if (isEmpty) {
+    if (escapedSearchError) {
+      resultsHtml = '';
+    } else if (isEmpty) {
       resultsHtml = '<div class="empty">Start typing to search...</div>';
     } else if (results.length === 0) {
       resultsHtml = `<div class="empty">No files found matching "${escapedQuery}"</div>`;
@@ -669,7 +759,9 @@ export class QuickSearchPanel {
       }
     }
 
-    const statsText = elapsed !== undefined
+    const statsText = escapedSearchError
+      ? ''
+      : elapsed !== undefined
       ? `Found ${results.length} results in ${elapsed}ms`
       : results.length > 0
         ? `${results.length} results`
@@ -780,9 +872,29 @@ export class QuickSearchPanel {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
     }
+    .search-popup {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      z-index: 20;
+      max-width: min(680px, calc(100vw - 32px));
+      padding: 10px 14px;
+      border: 1px solid var(--vscode-inputValidation-errorBorder);
+      border-radius: 6px;
+      background: var(--vscode-inputValidation-errorBackground);
+      color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+      box-shadow: 0 6px 20px rgba(0, 0, 0, .3);
+      transform: translateX(-50%);
+      animation: searchPopupFade 5s ease forwards;
+    }
+    @keyframes searchPopupFade {
+      0%, 72% { opacity: 1; }
+      100% { opacity: 0; visibility: hidden; }
+    }
   </style>
 </head>
 <body>
+  ${escapedSearchError ? `<div class="search-popup" role="alert">${escapedSearchError}</div>` : ''}
   <div class="header">
     <div class="search-box">
       <span class="search-icon">🔍</span>

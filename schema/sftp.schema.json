@@ -1,240 +1,124 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "StackerFTP Configuration",
-  "description": "Configuration file for StackerFTP VS Code extension",
+  "title": "ITFFTP Configuration",
+  "description": "Workspace connection configuration for the ITFFTP VS Code extension",
   "oneOf": [
     { "$ref": "#/definitions/config" },
     {
       "type": "array",
       "items": { "$ref": "#/definitions/config" },
-      "description": "Multiple server configurations"
+      "description": "Multiple ITFFTP connection configurations"
     }
   ],
   "definitions": {
-    "config": {
+    "protocol": {
+      "type": "string",
+      "enum": ["sftp", "ftp", "ftps"],
+      "description": "Transfer protocol to use"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "TCP port for the remote service"
+    },
+    "localPath": {
+      "type": "string",
+      "pattern": "^(?![A-Za-z]:[\\\\/])(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).*$",
+      "description": "Workspace-relative local directory; parent traversal and absolute paths are not allowed"
+    },
+    "autoSync": {
+      "type": "string",
+      "enum": ["off", "upload", "download", "both"],
+      "default": "off",
+      "description": "Transfer direction for local or remote changes after the file-watcher quiet period"
+    },
+    "remoteExplorerOrder": {
+      "type": "string",
+      "enum": ["name", "size", "date", "type"],
+      "description": "Sort order for this connection in Remote Explorer"
+    },
+    "syncMode": {
+      "type": "string",
+      "enum": ["update", "full"],
+      "default": "update",
+      "description": "Compare source freshness before transfer, or compare the complete tree"
+    },
+    "syncOption": {
       "type": "object",
-      "required": ["host", "username"],
+      "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string",
-          "description": "A friendly name for this connection"
-        },
-        "default": {
-          "type": "boolean",
-          "default": false,
-          "description": "Use this connection as the workspace default when multiple remote locations exist"
-        },
-        "host": {
-          "type": "string",
-          "description": "Hostname or IP address of the remote server"
-        },
-        "port": {
-          "type": "integer",
-          "default": 22,
-          "description": "Port number (22 for SFTP, 21 for FTP)"
-        },
-        "protocol": {
-          "type": "string",
-          "enum": ["sftp", "ftp", "ftps"],
-          "default": "sftp",
-          "description": "Transfer protocol to use"
-        },
-        "username": {
-          "type": "string",
-          "description": "Username for authentication"
-        },
-        "password": {
-          "type": "string",
-          "description": "Password for authentication (consider using privateKeyPath for SFTP)"
-        },
-        "privateKeyPath": {
-          "type": "string",
-          "description": "Path to private key file for SFTP authentication"
-        },
-        "passphrase": {
-          "type": "string",
-          "description": "Passphrase for the private key"
-        },
-        "agent": {
-          "type": "string",
-          "description": "Path to SSH agent socket"
-        },
-        "remotePath": {
-          "type": "string",
-          "default": "/",
-          "description": "The remote directory path to sync with"
-        },
-        "context": {
-          "type": "string",
-          "description": "Local context path (subdirectory to sync)"
-        },
-        "uploadOnSave": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically upload files when saved"
-        },
-        "downloadOnOpen": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically download files when opened"
-        },
-        "syncOption": {
+        "delete": { "type": "boolean", "default": false },
+        "skipCreate": { "type": "boolean", "default": false },
+        "ignoreExisting": { "type": "boolean", "default": false },
+        "update": { "type": "boolean", "default": false }
+      },
+      "description": "Declared compatibility options for legacy synchronization profiles"
+    },
+    "collisionPolicy": {
+      "type": "string",
+      "enum": ["ask", "overwrite", "skip"],
+      "default": "ask",
+      "description": "How to handle a path that already exists at the transfer target"
+    },
+    "ignore": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": [".vscode", ".git", ".DS_Store", "node_modules"],
+      "description": "Glob patterns and paths to exclude"
+    },
+    "watcher": {
+      "oneOf": [
+        { "type": "boolean" },
+        {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
-            "delete": {
-              "type": "boolean",
-              "default": false,
-              "description": "Delete files on target that don't exist on source"
+            "files": {
+              "type": "string",
+              "minLength": 1,
+              "default": "**/*",
+              "description": "Glob pattern for files to watch"
             },
-            "skipCreate": {
+            "autoUpload": {
               "type": "boolean",
-              "default": false,
-              "description": "Skip creating new files"
+              "default": true,
+              "description": "Upload matching local changes"
             },
-            "ignoreExisting": {
+            "autoDelete": {
               "type": "boolean",
               "default": false,
-              "description": "Ignore existing files"
-            },
-            "update": {
-              "type": "boolean",
-              "default": false,
-              "description": "Only update files that are newer"
-            }
-          }
-        },
-        "collisionPolicy": {
-          "type": "string",
-          "enum": ["ask", "overwrite", "skip"],
-          "default": "ask",
-          "description": "How to handle files that already exist at the transfer target"
-        },
-        "watcher": {
-          "oneOf": [
-            { "type": "boolean" },
-            {
-              "type": "object",
-              "properties": {
-                "files": {
-                  "type": "string",
-                  "description": "Glob pattern for files to watch"
-                },
-                "autoUpload": {
-                  "type": "boolean",
-                  "default": true,
-                  "description": "Automatically upload on file change"
-                },
-                "autoDelete": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "Automatically delete remote file on local delete"
-                }
-              }
-            }
-          ],
-          "description": "File watcher configuration"
-        },
-        "ignore": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [".vscode", ".git", ".DS_Store", "node_modules"],
-          "description": "Glob patterns of files to ignore"
-        },
-        "ignoreFile": {
-          "type": "string",
-          "description": "Path to a .gitignore style file for ignore patterns"
-        },
-        "secure": {
-          "oneOf": [
-            { "type": "boolean" },
-            { "type": "string", "enum": ["control", "implicit"] }
-          ],
-          "description": "Use secure connection (for FTP/FTPS)"
-        },
-        "secureOptions": {
-          "type": "object",
-          "description": "TLS/SSL options for secure connections"
-        },
-        "passive": {
-          "type": "boolean",
-          "default": true,
-          "description": "Use passive mode for FTP connections"
-        },
-        "interactiveAuth": {
-          "oneOf": [
-            { "type": "boolean" },
-            {
-              "type": "array",
-              "items": { "type": "string" }
-            }
-          ],
-          "description": "Enable keyboard-interactive authentication"
-        },
-        "connectTimeout": {
-          "type": "integer",
-          "default": 300000,
-          "description": "Connection timeout in milliseconds"
-        },
-        "keepalive": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 10000,
-          "description": "Keepalive interval in milliseconds; set to 0 to disable"
-        },
-        "autoReconnect": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically reconnect when the connection drops"
-        },
-        "hop": {
-          "oneOf": [
-            { "$ref": "#/definitions/hopConfig" },
-            {
-              "type": "array",
-              "items": { "$ref": "#/definitions/hopConfig" }
-            }
-          ],
-          "description": "Jump host configuration for connection hopping"
-        },
-        "profiles": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "description": "Profile-specific overrides"
-          },
-          "description": "Named profiles with configuration overrides"
-        },
-        "defaultProfile": {
-          "type": "string",
-          "description": "Default profile to use"
-        },
-        "remoteExplorer": {
-          "type": "object",
-          "properties": {
-            "order": {
-              "type": "integer",
-              "default": 0,
-              "description": "Order in the Remote Explorer view"
+              "description": "Delete the matching remote path after a local deletion"
             }
           }
         }
-      }
+      ],
+      "description": "Per-connection file-watcher options"
+    },
+    "secure": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "string", "enum": ["control", "implicit"] }
+      ],
+      "default": false,
+      "description": "TLS mode for FTP/FTPS connections"
     },
     "hopConfig": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["host", "username"],
       "properties": {
         "host": {
           "type": "string",
-          "description": "Hostname of the jump server"
+          "minLength": 1,
+          "description": "Hostname of the SFTP jump server"
         },
-        "port": {
-          "type": "integer",
-          "default": 22,
-          "description": "SSH port of the jump server"
-        },
+        "port": { "$ref": "#/definitions/port" },
         "username": {
           "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
           "description": "Username for the jump server"
         },
         "password": {
@@ -243,11 +127,170 @@
         },
         "privateKeyPath": {
           "type": "string",
-          "description": "Path to private key for the jump server"
+          "minLength": 1,
+          "description": "Path to a private key for the jump server"
         },
         "passphrase": {
           "type": "string",
-          "description": "Passphrase for the private key"
+          "description": "Passphrase for the jump-server private key"
+        }
+      }
+    },
+    "hop": {
+      "oneOf": [
+        { "$ref": "#/definitions/hopConfig" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/hopConfig" }
+        }
+      ],
+      "description": "SFTP jump host configuration"
+    },
+    "profileOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "default": { "type": "boolean" },
+        "host": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "port": { "$ref": "#/definitions/port" },
+        "protocol": { "$ref": "#/definitions/protocol" },
+        "username": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "password": { "type": "string" },
+        "privateKeyPath": { "type": "string", "minLength": 1 },
+        "passphrase": { "type": "string" },
+        "remotePath": { "type": "string", "minLength": 1 },
+        "localPath": { "$ref": "#/definitions/localPath" },
+        "autoSync": { "$ref": "#/definitions/autoSync" },
+        "uploadOnSave": { "type": "boolean" },
+        "downloadOnOpen": { "type": "boolean" },
+        "remoteExplorerOrder": { "$ref": "#/definitions/remoteExplorerOrder" },
+        "syncMode": { "$ref": "#/definitions/syncMode" },
+        "syncOption": { "$ref": "#/definitions/syncOption" },
+        "collisionPolicy": { "$ref": "#/definitions/collisionPolicy" },
+        "ignore": { "$ref": "#/definitions/ignore" },
+        "watcher": { "$ref": "#/definitions/watcher" },
+        "connTimeout": { "type": "integer", "minimum": 1 },
+        "keepalive": { "type": "integer", "minimum": 0 },
+        "secure": { "$ref": "#/definitions/secure" },
+        "secureOptions": { "type": "object" },
+        "passive": { "type": "boolean" },
+        "hop": { "$ref": "#/definitions/hop" },
+        "autoReconnect": { "type": "boolean" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["host", "protocol", "username", "remotePath"] },
+        { "required": ["remote"] }
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Friendly name for this connection"
+        },
+        "default": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use this connection as the workspace default"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Hostname or IP address of the remote server"
+        },
+        "port": { "$ref": "#/definitions/port" },
+        "protocol": { "$ref": "#/definitions/protocol" },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Username for authentication"
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for authentication"
+        },
+        "privateKeyPath": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to a private key for SFTP authentication"
+        },
+        "passphrase": {
+          "type": "string",
+          "description": "Passphrase for the SFTP private key"
+        },
+        "remotePath": {
+          "type": "string",
+          "minLength": 1,
+          "default": "/",
+          "description": "Remote directory to use as the connection root"
+        },
+        "localPath": { "$ref": "#/definitions/localPath" },
+        "remote": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Name of a reusable connection in the stackerftp.remotes VS Code setting"
+        },
+        "autoSync": { "$ref": "#/definitions/autoSync" },
+        "uploadOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Legacy upload-side switch still consumed by the file watcher"
+        },
+        "downloadOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Download a remote file into the workspace when it is opened"
+        },
+        "remoteExplorerOrder": { "$ref": "#/definitions/remoteExplorerOrder" },
+        "syncMode": { "$ref": "#/definitions/syncMode" },
+        "syncOption": { "$ref": "#/definitions/syncOption" },
+        "collisionPolicy": { "$ref": "#/definitions/collisionPolicy" },
+        "ignore": { "$ref": "#/definitions/ignore" },
+        "watcher": { "$ref": "#/definitions/watcher" },
+        "profiles": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/profileOverride" },
+          "description": "Named partial overrides for this connection"
+        },
+        "defaultProfile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Named profile applied by default"
+        },
+        "connTimeout": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10000,
+          "description": "Connection timeout in milliseconds"
+        },
+        "keepalive": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 300000,
+          "description": "Keepalive interval in milliseconds; use 0 to disable it"
+        },
+        "secure": { "$ref": "#/definitions/secure" },
+        "secureOptions": {
+          "type": "object",
+          "description": "Node.js TLS options for FTP/FTPS connections"
+        },
+        "passive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use passive FTP mode"
+        },
+        "hop": { "$ref": "#/definitions/hop" },
+        "autoReconnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reconnect after an unexpected connection loss"
         }
       }
     }

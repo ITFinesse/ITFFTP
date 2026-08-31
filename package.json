@@ -89,7 +89,7 @@
         "stackerftp.showWebMasterTools": {
           "type": "boolean",
           "default": true,
-          "description": "Show web master tools in explorer"
+          "description": "Show WebMaster commands in the Command Palette and explorer menus"
         },
         "stackerftp.enableFileWatcher": {
           "type": "boolean",
@@ -110,11 +110,6 @@
           "type": "boolean",
           "default": true,
           "description": "Enable syntax highlighting for remote files"
-        },
-        "stackerftp.useNativeTreeView": {
-          "type": "boolean",
-          "default": true,
-          "description": "Use native TreeView with File Icon Theme support (requires reload). Disable to use WebView with preview support."
         },
         "stackerftp.downloadWhenOpenInRemoteExplorer": {
           "type": "boolean",
@@ -144,6 +139,7 @@
           "description": "Remote-FS Integration: Define reusable remote server configurations. Reference them in sftp.json with \"remote\": \"name\"",
           "additionalProperties": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
               "name": {
                 "type": "string",
@@ -151,10 +147,14 @@
               },
               "host": {
                 "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
                 "description": "Hostname or IP address"
               },
               "port": {
-                "type": "number",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
                 "description": "Port number"
               },
               "protocol": {
@@ -168,6 +168,8 @@
               },
               "username": {
                 "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
                 "description": "Username for authentication"
               },
               "password": {
@@ -176,10 +178,16 @@
               },
               "privateKeyPath": {
                 "type": "string",
+                "minLength": 1,
                 "description": "Path to SSH private key"
+              },
+              "passphrase": {
+                "type": "string",
+                "description": "Passphrase for the SSH private key"
               },
               "remotePath": {
                 "type": "string",
+                "minLength": 1,
                 "description": "Default remote path"
               }
             },
@@ -245,7 +253,7 @@
       },
       {
         "command": "stackerftp.connect",
-        "title": "SFTP: Connect",
+        "title": "ITFFTP: Connect",
         "category": "ITFFTP",
         "icon": "$(plug)"
       },
@@ -257,7 +265,7 @@
       },
       {
         "command": "stackerftp.disconnect",
-        "title": "SFTP: Disconnect",
+        "title": "ITFFTP: Disconnect",
         "category": "ITFFTP",
         "icon": "$(debug-disconnect)"
       },
@@ -269,7 +277,7 @@
       },
       {
         "command": "stackerftp.uploadCurrentFile",
-        "title": "SFTP: Upload Current File",
+        "title": "ITFFTP: Upload Current File",
         "category": "ITFFTP"
       },
       {
@@ -280,19 +288,19 @@
       },
       {
         "command": "stackerftp.syncToRemote",
-        "title": "SFTP: Sync Local → Remote",
+        "title": "ITFFTP: Sync Local → Remote",
         "category": "ITFFTP",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "stackerftp.syncToLocal",
-        "title": "SFTP: Sync Remote → Local",
+        "title": "ITFFTP: Sync Remote → Local",
         "category": "ITFFTP",
         "icon": "$(cloud-download)"
       },
       {
         "command": "stackerftp.syncBothWays",
-        "title": "SFTP: Sync Both Directions",
+        "title": "ITFFTP: Sync Both Directions",
         "category": "ITFFTP",
         "icon": "$(sync)"
       },
@@ -315,7 +323,7 @@
       },
       {
         "command": "stackerftp.diff",
-        "title": "SFTP: Diff with Remote",
+        "title": "ITFFTP: Diff with Remote",
         "category": "ITFFTP",
         "icon": "$(git-compare)"
       },
@@ -369,41 +377,41 @@
       },
       {
         "command": "stackerftp.setProfile",
-        "title": "SFTP: Set Profile",
+        "title": "ITFFTP: Set Profile",
         "category": "ITFFTP"
       },
       {
         "command": "stackerftp.cancelTransfer",
-        "title": "SFTP: Cancel Transfer",
+        "title": "ITFFTP: Cancel Transfer",
         "category": "ITFFTP",
         "icon": "$(debug-stop)"
       },
       {
         "command": "stackerftp.downloadProject",
-        "title": "SFTP: Download Project",
+        "title": "ITFFTP: Download Project",
         "category": "ITFFTP",
         "icon": "$(cloud-download)"
       },
       {
         "command": "stackerftp.uploadProject",
-        "title": "SFTP: Upload Project",
+        "title": "ITFFTP: Upload Project",
         "category": "ITFFTP",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "stackerftp.terminal",
-        "title": "SFTP: Open Remote Terminal",
+        "title": "ITFFTP: Open Remote Terminal",
         "category": "ITFFTP",
         "icon": "$(terminal)"
       },
       {
         "command": "stackerftp.viewLogs",
-        "title": "SFTP: View Logs",
+        "title": "ITFFTP: View Logs",
         "category": "ITFFTP"
       },
       {
         "command": "stackerftp.clearLogs",
-        "title": "SFTP: Clear Logs",
+        "title": "ITFFTP: Clear Logs",
         "category": "ITFFTP"
       },
       {
@@ -450,7 +458,7 @@
       },
       {
         "command": "stackerftp.webmaster.compareFolders",
-        "title": "Compare Local and Remote Folders",
+        "title": "Transfer",
         "category": "ITFFTP - WebMaster",
         "icon": "$(git-compare)"
       },
@@ -468,7 +476,7 @@
       },
       {
         "command": "stackerftp.showTransferQueue",
-        "title": "SFTP: Show Transfer Queue",
+        "title": "ITFFTP: Show Transfer Queue",
         "category": "ITFFTP",
         "icon": "$(list-tree)"
       },
@@ -492,24 +500,24 @@
       },
       {
         "command": "stackerftp.transferQueue",
-        "title": "SFTP: Show Transfer Queue (Legacy)",
+        "title": "ITFFTP: Show Transfer Queue (Legacy)",
         "category": "ITFFTP",
         "icon": "$(list-tree)"
       },
       {
         "command": "stackerftp.newConnection",
-        "title": "SFTP: New Connection (Wizard)",
+        "title": "ITFFTP: New Connection (Wizard)",
         "category": "ITFFTP",
         "icon": "$(add)"
       },
       {
         "command": "stackerftp.switchProtocol",
-        "title": "SFTP: Switch Protocol",
+        "title": "ITFFTP: Switch Protocol",
         "category": "ITFFTP"
       },
       {
         "command": "stackerftp.quickConnect",
-        "title": "SFTP: Quick Connect",
+        "title": "ITFFTP: Quick Connect",
         "category": "ITFFTP",
         "icon": "$(plug)"
       },
@@ -545,7 +553,7 @@
       },
       {
         "command": "stackerftp.listRemoteRevisions",
-        "title": "SFTP: List Remote Revisions",
+        "title": "ITFFTP: List Remote Revisions",
         "category": "ITFFTP",
         "icon": "$(history)"
       },
@@ -655,6 +663,134 @@
         {
           "command": "stackerftp.switchProtocol",
           "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "stackerftp.tree.openFile",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.tree.download",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.tree.delete",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.tree.refresh",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.openRemoteFile",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.deleteRemote",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.rename",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.duplicate",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.editInLocal",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.revealInExplorer",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.viewContent",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.copyToOtherRemote",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.compareRemotes",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.syncBetweenRemotes",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.cancelTransferItem",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.retryTransferItem",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.expandAll",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.collapseAll",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.expandConnection",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.collapseConnection",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.selectAllFiles",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.transferQueue",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.chmod",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.checksum",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.compareChecksum",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.search",
+          "when": "config.stackerftp.showWebMasterTools"
+        },
+        {
+          "command": "stackerftp.webmaster.quickSearch",
+          "when": "config.stackerftp.showWebMasterTools"
+        },
+        {
+          "command": "stackerftp.webmaster.replace",
+          "when": "config.stackerftp.showWebMasterTools"
+        },
+        {
+          "command": "stackerftp.webmaster.backup",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.compareFolders",
+          "when": "config.stackerftp.showWebMasterTools"
+        },
+        {
+          "command": "stackerftp.webmaster.fileInfo",
+          "when": "false"
+        },
+        {
+          "command": "stackerftp.webmaster.purgeCache",
+          "when": "config.stackerftp.showWebMasterTools"
         }
       ],
       "explorer/context": [
@@ -701,12 +837,12 @@
         {
           "command": "stackerftp.webmaster.compareFolders",
           "group": "2_compare@2",
-          "when": "explorerResourceIsFolder"
+          "when": "explorerResourceIsFolder && config.stackerftp.showWebMasterTools"
         },
         {
           "command": "stackerftp.webmaster.quickSearch",
           "group": "2_compare@3",
-          "when": "explorerResourceIsFolder"
+          "when": "explorerResourceIsFolder && config.stackerftp.showWebMasterTools"
         },
         {
           "command": "stackerftp.syncToRemote",
@@ -766,195 +902,6 @@
           "group": "3_force@2"
         }
       ],
-      "view/title": [
-        {
-          "command": "stackerftp.refresh",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "navigation@1"
-        },
-        {
-          "command": "stackerftp.webmaster.quickSearch",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "navigation@2"
-        },
-        {
-          "command": "stackerftp.expandAll",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "navigation@2"
-        },
-        {
-          "command": "stackerftp.quickConnect",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "1_connection@1"
-        },
-        {
-          "command": "stackerftp.disconnect",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "1_connection@2"
-        },
-        {
-          "command": "stackerftp.config",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "3_settings@1"
-        },
-        {
-          "command": "stackerftp.viewLogs",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "3_settings@2"
-        },
-        {
-          "command": "stackerftp.terminal",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "3_settings@3"
-        },
-        {
-          "command": "stackerftp.toggleHiddenFiles",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "4_view@1"
-        },
-        {
-          "command": "stackerftp.sortByName",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "5_sort@1"
-        },
-        {
-          "command": "stackerftp.sortBySize",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "5_sort@2"
-        },
-        {
-          "command": "stackerftp.sortByDate",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "5_sort@3"
-        },
-        {
-          "command": "stackerftp.cancelTransfer",
-          "when": "view == stackerftp.transferQueue",
-          "group": "navigation@1"
-        },
-        {
-          "command": "stackerftp.clearTransferQueue",
-          "when": "view == stackerftp.transferQueue",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "stackerftp.tree.openFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "1_open@1"
-        },
-        {
-          "command": "stackerftp.viewContent",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "1_open@2"
-        },
-        {
-          "command": "stackerftp.editInLocal",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "1_open@3"
-        },
-        {
-          "command": "stackerftp.tree.download",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "2_transfer@1"
-        },
-        {
-          "command": "stackerftp.upload",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /directory$/",
-          "group": "2_transfer@2"
-        },
-        {
-          "command": "stackerftp.diff",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "3_compare@1"
-        },
-        {
-          "command": "stackerftp.rename",
-          "when": "view == stackerftp.remoteExplorerTree && !(viewItem =~ /-connected$/)",
-          "group": "5_modify@1"
-        },
-        {
-          "command": "stackerftp.duplicate",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "5_modify@2"
-        },
-        {
-          "command": "stackerftp.webmaster.chmod",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /^sftp-file$/",
-          "group": "5_modify@3"
-        },
-        {
-          "command": "stackerftp.webmaster.fileInfo",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /^sftp-file$/",
-          "group": "5_modify@4"
-        },
-        {
-          "command": "stackerftp.webmaster.checksum",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /^sftp-(file|directory)$/",
-          "group": "5_modify@5"
-        },
-        {
-          "command": "stackerftp.webmaster.compareChecksum",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /^(sftp|ftp|ftps)-file$/",
-          "group": "5_modify@6"
-        },
-        {
-          "command": "stackerftp.webmaster.backup",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /^sftp-(file|directory)$/",
-          "group": "5_modify@7"
-        },
-        {
-          "command": "stackerftp.tree.delete",
-          "when": "view == stackerftp.remoteExplorerTree && !(viewItem =~ /-connected$/)",
-          "group": "6_danger@1"
-        },
-        {
-          "command": "stackerftp.revealInExplorer",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /file$/",
-          "group": "7_navigation@1"
-        },
-        {
-          "command": "stackerftp.tree.refresh",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "7_navigation@2"
-        },
-        {
-          "command": "stackerftp.newFile",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /(-connected|directory)$/",
-          "group": "1_files@1"
-        },
-        {
-          "command": "stackerftp.newFolder",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /(-connected|directory)$/",
-          "group": "1_files@2"
-        },
-        {
-          "command": "stackerftp.webmaster.quickSearch",
-          "when": "view == stackerftp.remoteExplorerTree",
-          "group": "1_files@3"
-        },
-        {
-          "command": "stackerftp.connect",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem == disconnected",
-          "group": "1_connection"
-        },
-        {
-          "command": "stackerftp.disconnect",
-          "when": "view == stackerftp.remoteExplorerTree && viewItem =~ /-connected$/",
-          "group": "1_connection"
-        },
-        {
-          "command": "stackerftp.cancelTransferItem",
-          "when": "view == stackerftp.transferQueue && viewItem =~ /transfer-(pending|transferring)/",
-          "group": "inline"
-        },
-        {
-          "command": "stackerftp.retryTransferItem",
-          "when": "view == stackerftp.transferQueue && viewItem =~ /^transfer-error$/",
-          "group": "navigation@1"
-        }
-      ],
       "scm/title": [
         {
           "command": "stackerftp.uploadChangedFiles",
@@ -992,21 +939,6 @@
           "contextualTitle": "ITFFTP",
           "visibility": "visible",
           "icon": "$(dashboard)"
-        },
-        {
-          "id": "stackerftp.connectionForm",
-          "name": "Connections",
-          "when": "false"
-        },
-        {
-          "id": "stackerftp.remoteExplorerTree",
-          "name": "Remote Explorer",
-          "when": "false"
-        },
-        {
-          "id": "stackerftp.transferQueue",
-          "name": "Transfer Queue",
-          "when": "false"
         }
       ]
     },
@@ -1056,14 +988,15 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run bundle",
+    "vscode:prepublish": "node scripts/release-gate.js --prepublish",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "bundle": "node esbuild.js --minify",
     "bundle:dev": "node esbuild.js",
     "lint": "eslint src --ext ts --no-eslintrc --config .eslintrc.json",
     "test": "node scripts/run-tests.js",
-    "package": "vsce package"
+    "release:gate": "node scripts/release-gate.js",
+    "package": "node scripts/release-gate.js"
   },
   "devDependencies": {
     "@types/mime-types": "^2.1.4",
@@ -1073,6 +1006,8 @@
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "@vscode/codicons": "^0.0.35",
+    "@vscode/vsce": "3.7.1",
+    "ajv": "^8.17.1",
     "basic-ftp": "^5.2.1",
     "esbuild": "^0.27.3",
     "eslint": "^8.0.0",
@@ -1083,7 +1018,7 @@
     "ssh2": "^1.15.0",
     "typescript": "^5.0.0",
     "vitest": "^1.6.0",
-    "vsce": "^2.15.0"
+    "yauzl": "2.10.0"
   },
   "dependencies": {
     "chart.js": "^4.5.1"
